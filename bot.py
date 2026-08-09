@@ -1,3 +1,5 @@
+from flask import Flask
+from threading import Thread
 from threading import Thread
 from http.server import HTTPServer, BaseHTTPRequestHandler
 import os
@@ -465,6 +467,18 @@ def run_web_server():
     port = int(os.environ.get("PORT", 10000))
     server = HTTPServer(("0.0.0.0", port), HealthHandler)
     server.serve_forever()
+
+# Render Keep Alive
+keep_alive = Flask(__name__)
+
+@keep_alive.route("/")
+def home():
+    return "Bot is alive!"
+
+def run_keep_alive():
+    keep_alive.run(host="0.0.0.0", port=10000)
+
+Thread(target=run_keep_alive, daemon=True).start()
 
 # ---------------- اجرای ربات ----------------
 def main():
