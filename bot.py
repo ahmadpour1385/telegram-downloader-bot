@@ -476,7 +476,10 @@ def home():
     return "Bot is alive!"
 
 def run_keep_alive():
-    keep_alive.run(host="0.0.0.0", port=10000)
+keep_alive.run(
+    host="0.0.0.0",
+    port=int(os.environ.get("PORT", 10000))
+)
 
 Thread(target=run_keep_alive, daemon=True).start()
 
