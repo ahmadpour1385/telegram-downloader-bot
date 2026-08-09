@@ -1,0 +1,22 @@
+# متغیرهای محیطی و توکن‌های حساس
+.env
+
+# داده‌های پایدار ربات (وضعیت کاربرها)
+bot_data.pkl
+
+# فایل‌های دانلودی موقت
+downloads/*
+!downloads/.gitkeep
+
+# پایتون
+__pycache__/
+*.pyc
+*.pyo
+venv/
+.venv/
+env/
+
+# سیستم عامل / ادیتور
+.DS_Store
+.vscode/
+.idea/
