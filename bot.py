@@ -1,3 +1,5 @@
+from threading import Thread
+from http.server import HTTPServer, BaseHTTPRequestHandler
 import os
 import re
 import uuid
@@ -449,8 +451,24 @@ async def post_init(application):
     await application.bot.set_chat_menu_button(menu_button=MenuButtonCommands())
 
 
+class HealthHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"Bot is running")
+
+    def log_message(self, format, *args):
+        pass
+
+
+def run_web_server():
+    port = int(os.environ.get("PORT", 10000))
+    server = HTTPServer(("0.0.0.0", port), HealthHandler)
+    server.serve_forever()
+
 # ---------------- اجرای ربات ----------------
 def main():
+    Thread(target=run_web_server, daemon=True).start()
     persistence = PicklePersistence(filepath=PERSISTENCE_FILE)
 
     app = (
