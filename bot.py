@@ -7,6 +7,7 @@ import uuid
 import asyncio
 import logging
 import subprocess
+import shutil
 from concurrent.futures import ThreadPoolExecutor
 import requests
 import yt_dlp
@@ -325,7 +326,7 @@ def download_media(url: str, media_type: str = "video_audio"):
         "retries": 5,
         "fragment_retries": 5,
         "nocheckcertificate": True,
-        "cookiefile": "/etc/secrets/cookies.txt",
+        "cookiefile": COOKIE_FILE,
     }
 
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -350,6 +351,13 @@ def download_media(url: str, media_type: str = "video_audio"):
             return [(thumb_path, "photo")]
 
     return [(file_path, "photo")]
+
+
+COOKIE_SOURCE = "/etc/secrets/cookies.txt"
+COOKIE_FILE = os.path.join(DOWNLOAD_DIR, "cookies.txt")
+
+if os.path.exists(COOKIE_SOURCE):
+    shutil.copy2(COOKIE_SOURCE, COOKIE_FILE)
 
 
 # ---------------- دانلود ویدیو (با صدای سالم داخلش) + استخراج یه فایل صدای جداگانه ----------------
