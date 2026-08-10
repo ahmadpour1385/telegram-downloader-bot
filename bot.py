@@ -470,7 +470,6 @@ Thread(target=run_keep_alive, daemon=True).start()
 
 # ---------------- اجرای ربات ----------------
 def main():
-    Thread(target=run_web_server, daemon=True).start()
     persistence = PicklePersistence(filepath=PERSISTENCE_FILE)
 
     app = (
