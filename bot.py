@@ -325,6 +325,7 @@ def download_media(url: str, media_type: str = "video_audio"):
         "retries": 5,
         "fragment_retries": 5,
         "nocheckcertificate": True,
+        "cookiefile": "/etc/secrets/cookies.txt",
     }
 
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
