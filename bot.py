@@ -359,6 +359,9 @@ COOKIE_FILE = os.path.join(DOWNLOAD_DIR, "cookies.txt")
 if os.path.exists(COOKIE_SOURCE):
     shutil.copy2(COOKIE_SOURCE, COOKIE_FILE)
 
+    print("COOKIE SOURCE EXISTS:", os.path.exists(COOKIE_SOURCE))
+print("COOKIE FILE EXISTS:", os.path.exists(COOKIE_FILE))
+
 
 # ---------------- دانلود ویدیو (با صدای سالم داخلش) + استخراج یه فایل صدای جداگانه ----------------
 def _download_video_with_audio(url: str, unique_prefix: str):
