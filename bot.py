@@ -386,9 +386,14 @@ def _download_video_with_audio(url: str, unique_prefix: str):
         "nocheckcertificate": True,
     }
 
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        info = ydl.extract_info(url, download=True)
-        raw_path = ydl.prepare_filename(info)
+    logger.info("YT-DLP: شروع دانلود %s", url)
+
+with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+    logger.info("YT-DLP: شروع extract_info")
+    info = ydl.extract_info(url, download=True)
+    logger.info("YT-DLP: extract_info موفق شد")
+    file_path = ydl.prepare_filename(info)
+    logger.info("YT-DLP: مسیر فایل: %s", file_path)
 
     # بعد از merge توسط yt-dlp/ffmpeg، پسوند نهایی فایل mp4 هست
     video_path = os.path.splitext(raw_path)[0] + ".mp4"
