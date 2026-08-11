@@ -370,9 +370,11 @@ print("COPIED:", os.path.exists(COOKIE_FILE), flush=True)
 # ---------------- دانلود ویدیو (با صدای سالم داخلش) + استخراج یه فایل صدای جداگانه ----------------
 def _download_video_with_audio(url: str, unique_prefix: str):
     # فرمت رو طوری انتخاب می‌کنیم که بهترین ویدیو و بهترین صدا با هم merge بشن
-    # و merge_output_format=mp4 تضمین می‌کنه خروجی نهایی یه mp4 استانداردِ قابل پخش با صدای سالم باشه
     ydl_opts = {
-        "outtmpl": os.path.join(DOWNLOAD_DIR, f"{unique_prefix}_%(id)s.%(ext)s"),
+        "outtmpl": os.path.join(
+            DOWNLOAD_DIR,
+            f"{unique_prefix}_%(id)s.%(ext)s"
+        ),
         "format": "bestvideo*+bestaudio/best",
         "merge_output_format": "mp4",
         "noplaylist": True,
@@ -384,33 +386,41 @@ def _download_video_with_audio(url: str, unique_prefix: str):
         "retries": 5,
         "fragment_retries": 5,
         "nocheckcertificate": True,
+        "cookiefile": COOKIE_FILE,
     }
 
     logger.info("YT-DLP: شروع دانلود %s", url)
 
-with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-    logger.info("YT-DLP: شروع extract_info")
-    info = ydl.extract_info(url, download=True)
-    logger.info("YT-DLP: extract_info موفق شد")
-    file_path = ydl.prepare_filename(info)
-    logger.info("YT-DLP: مسیر فایل: %s", file_path)
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        logger.info("YT-DLP: شروع extract_info")
+        info = ydl.extract_info(url, download=True)
+        logger.info("YT-DLP: extract_info موفق شد")
+
+        raw_path = ydl.prepare_filename(info)
+        logger.info("YT-DLP: مسیر فایل خام: %s", raw_path)
 
     # بعد از merge توسط yt-dlp/ffmpeg، پسوند نهایی فایل mp4 هست
     video_path = os.path.splitext(raw_path)[0] + ".mp4"
+
     if not os.path.exists(video_path):
-        # بعضی لینک‌ها (مثلاً پست عکسی) خروجی ویدیو ندارن؛ همون فایل خام رو برمی‌گردونیم
+        # بعضی لینک‌ها ممکنه خروجی نهایی دقیقاً mp4 نباشه
         if os.path.exists(raw_path):
             video_path = raw_path
         else:
-            raise FileNotFoundError("فایل ویدیو بعد از دانلود پیدا نشد.")
+            raise FileNotFoundError(
+                "فایل ویدیو بعد از دانلود پیدا نشد."
+            )
 
     results = [(video_path, "video")]
 
-    # حالا از روی همین فایل ویدیوی دانلودشده (نه با دانلود مجدد از اینترنت)
-    # یه فایل mp3 جدا و سالم استخراج می‌کنیم
-    audio_path = os.path.splitext(video_path)[0] + "_audio.mp3"
+    # استخراج فایل MP3 از روی همان ویدیوی دانلودشده
+    audio_path = (
+        os.path.splitext(video_path)[0] + "_audio.mp3"
+    )
+
     extract_cmd = [
-        "ffmpeg", "-y",
+        "ffmpeg",
+        "-y",
         "-i", video_path,
         "-vn",
         "-acodec", "libmp3lame",
@@ -418,6 +428,7 @@ with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         "-ab", "192k",
         audio_path,
     ]
+
     try:
         result = subprocess.run(
             extract_cmd,
@@ -426,16 +437,32 @@ with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             timeout=180,
         )
     except FileNotFoundError:
-        raise FileNotFoundError("ffmpeg روی سیستم پیدا نشد؛ مطمئن شو نصب و در PATH هست.")
+        raise FileNotFoundError(
+            "ffmpeg روی سیستم پیدا نشد؛ مطمئن شو نصب و در PATH هست."
+        )
 
-    if result.returncode == 0 and os.path.exists(audio_path) and os.path.getsize(audio_path) > 0:
+    if (
+        result.returncode == 0
+        and os.path.exists(audio_path)
+        and os.path.getsize(audio_path) > 0
+    ):
         results.append((audio_path, "audio"))
+
     else:
-        # اگه لینک اصلاً صدا نداشته (مثلاً یه ویدیوی بی‌صدا)، خطا نمی‌دیم؛
-        # فقط بدون فایل صدا ادامه می‌دیم و همون ویدیو رو می‌فرستیم
-        stderr_text = result.stderr.decode("utf-8", errors="ignore").lower()
-        if "does not contain any stream" not in stderr_text and "output file is empty" not in stderr_text:
-            logger.warning(f"استخراج صدا ناموفق بود برای {video_path}: {stderr_text[-300:]}")
+        stderr_text = result.stderr.decode(
+            "utf-8",
+            errors="ignore"
+        ).lower()
+
+        if (
+            "does not contain any stream" not in stderr_text
+            and "output file is empty" not in stderr_text
+        ):
+            logger.warning(
+                f"استخراج صدا ناموفق بود برای "
+                f"{video_path}: {stderr_text[-300:]}"
+            )
+
         if os.path.exists(audio_path):
             os.remove(audio_path)
 
