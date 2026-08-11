@@ -1,5 +1,5 @@
 python-telegram-bot[rate-limiter]==21.4
-yt-dlp>=2024.8.6
+yt-dlp==2026.07.04
 requests>=2.31.0
 python-dotenv>=1.0.1
 aiolimiter
