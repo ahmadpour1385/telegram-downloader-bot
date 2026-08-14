@@ -6,6 +6,7 @@ import re
 import json
 import uuid
 import asyncio
+from datetime import datetime, timedelta
 import logging
 import subprocess
 import shutil
@@ -37,6 +38,59 @@ if not BOT_TOKEN:
 
 DOWNLOAD_DIR = "downloads"
 PERSISTENCE_FILE = "bot_data.pkl"
+
+# ---------------- آمار کاربران ----------------
+# فقط این User ID می‌تواند آمار ربات را ببیند.
+# در Render یک Environment Variable با نام ADMIN_ID بساز.
+ADMIN_ID = int(os.environ.get("ADMIN_ID", "0"))
+
+async def track_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """ثبت کاربر و زمان آخرین فعالیت برای محاسبه آمار."""
+    user = update.effective_user
+    if not user:
+        return
+
+    users = context.application.bot_data.setdefault("stats_users", {})
+    user_id = str(user.id)
+    now = datetime.utcnow().isoformat()
+
+    users[user_id] = {
+        "first_seen": users.get(user_id, {}).get("first_seen", now),
+        "last_seen": now,
+    }
+
+async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """نمایش آمار فقط برای ادمین؛ کاربران عادی هیچ پاسخی نمی‌گیرند."""
+    user = update.effective_user
+    if not user or user.id != ADMIN_ID:
+        return
+
+    users = context.application.bot_data.get("stats_users", {})
+    now = datetime.utcnow()
+    monthly_cutoff = now - timedelta(days=30)
+    daily_cutoff = now - timedelta(days=1)
+
+    monthly_users = 0
+    daily_users = 0
+
+    for data in users.values():
+        try:
+            last_seen = datetime.fromisoformat(data["last_seen"])
+        except (KeyError, TypeError, ValueError):
+            continue
+
+        if last_seen >= monthly_cutoff:
+            monthly_users += 1
+        if last_seen >= daily_cutoff:
+            daily_users += 1
+
+    await update.message.reply_text(
+        "📊 آمار ربات\n\n"
+        f"👥 کل کاربران: {len(users)}\n"
+        f"📅 کاربران ماهانه (۳۰ روز اخیر): {monthly_users}\n"
+        f"🟢 کاربران امروز: {daily_users}"
+    )
+
 
 # ترد پول اختصاصی برای دانلود، مستقل از تعداد هسته‌ی CPU سرور
 DOWNLOAD_EXECUTOR = ThreadPoolExecutor(max_workers=20)
@@ -138,6 +192,8 @@ async def track_msg(context: ContextTypes.DEFAULT_TYPE, msg):
 
 
 async def cleanup_bot_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await track_user(update, context)
+
     """
     این هندلر با اولویت بالا (group=-1) روی هر پیام ورودی از کاربر اجرا می‌شه،
     قبل از این‌که هندلر اصلی همون پیام پردازش بشه.
@@ -736,6 +792,7 @@ def main():
     # و قبل از پردازش پیام جدید، پیام‌های متنی ربات از نوبت قبل رو پاک می‌کنه
     app.add_handler(MessageHandler(filters.ALL, cleanup_bot_messages), group=-1)
 
+    app.add_handler(CommandHandler("stats", stats_command))
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("type", change_type))
     app.add_handler(CommandHandler("newlink", new_link))
