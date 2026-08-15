@@ -1,16 +1,15 @@
 from flask import Flask
 from threading import Thread
-from threading import Thread
 import os
 import re
 import json
 import uuid
 import asyncio
-from datetime import datetime, timedelta
 import logging
 import subprocess
 import shutil
 import http.cookiejar
+from urllib.parse import urlparse
 from concurrent.futures import ThreadPoolExecutor
 import requests
 import yt_dlp
@@ -25,18 +24,11 @@ from telegram.ext import (
     AIORateLimiter,
     filters,
 )
-os.environ["PATH"] += os.pathsep + os.path.expanduser("~/.deno/bin")
-DENO_PATH = os.path.expanduser("~/.deno/bin")
-os.environ["PATH"] = DENO_PATH + os.pathsep + os.environ.get("PATH", "")
-
-print("=== DENO TEST ===", flush=True)
-print("DENO PATH:", DENO_PATH, flush=True)
-print("DENO EXISTS:", os.path.exists(os.path.join(DENO_PATH, "deno")), flush=True)
 
 # ---------------- تنظیمات ----------------
 load_dotenv()  # مقادیر رو از فایل .env می‌خونه
 
-BOT_TOKEN = os.environ.get("BOT_TOKEN", "8942197413:AAFUd3CCx3xJOrf8mJRlRq0a2OVnl4f-FNc")
+BOT_TOKEN = os.environ.get("BOT_TOKEN")
 if not BOT_TOKEN:
     raise RuntimeError(
         "BOT_TOKEN پیدا نشد. یه فایل .env کنار bot.py بساز و توش بنویس:\n"
@@ -46,61 +38,8 @@ if not BOT_TOKEN:
 DOWNLOAD_DIR = "downloads"
 PERSISTENCE_FILE = "bot_data.pkl"
 
-# ---------------- آمار کاربران ----------------
-# فقط این User ID می‌تواند آمار ربات را ببیند.
-# در Render یک Environment Variable با نام ADMIN_ID بساز.
-ADMIN_ID = int(os.environ.get("ADMIN_ID", "0"))
-
-async def track_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """ثبت کاربر و زمان آخرین فعالیت برای محاسبه آمار."""
-    user = update.effective_user
-    if not user:
-        return
-
-    users = context.application.bot_data.setdefault("stats_users", {})
-    user_id = str(user.id)
-    now = datetime.utcnow().isoformat()
-
-    users[user_id] = {
-        "first_seen": users.get(user_id, {}).get("first_seen", now),
-        "last_seen": now,
-    }
-
-async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """نمایش آمار فقط برای ادمین؛ کاربران عادی هیچ پاسخی نمی‌گیرند."""
-    user = update.effective_user
-    if not user or user.id != ADMIN_ID:
-        return
-
-    users = context.application.bot_data.get("stats_users", {})
-    now = datetime.utcnow()
-    monthly_cutoff = now - timedelta(days=30)
-    daily_cutoff = now - timedelta(days=1)
-
-    monthly_users = 0
-    daily_users = 0
-
-    for data in users.values():
-        try:
-            last_seen = datetime.fromisoformat(data["last_seen"])
-        except (KeyError, TypeError, ValueError):
-            continue
-
-        if last_seen >= monthly_cutoff:
-            monthly_users += 1
-        if last_seen >= daily_cutoff:
-            daily_users += 1
-
-    await update.message.reply_text(
-        "📊 آمار ربات\n\n"
-        f"👥 کل کاربران: {len(users)}\n"
-        f"📅 کاربران ماهانه (۳۰ روز اخیر): {monthly_users}\n"
-        f"🟢 کاربران امروز: {daily_users}"
-    )
-
-
 # ترد پول اختصاصی برای دانلود، مستقل از تعداد هسته‌ی CPU سرور
-DOWNLOAD_EXECUTOR = ThreadPoolExecutor(max_workers=20)
+DOWNLOAD_EXECUTOR = ThreadPoolExecutor(max_workers=3)
 
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
@@ -133,6 +72,11 @@ TEXTS = {
         "downloading_video_audio": "⏳🎧 در حال دانلود ویدیو و آماده‌سازی فایل صدا... چند لحظه صبر کن",
         "done": "✅ دانلود انجام شد!",
         "failed": "❌ نشد دانلودش کنم.\nخطا: {err}",
+        "unsupported_platform": (
+            "🚧 این پلتفرم فعلاً پشتیبانی نمی‌شود.\n\n"
+            "در حال حاضر فقط لینک‌های Instagram قابل دانلود هستند.\n"
+            "قابلیت دانلود از سایر پلتفرم‌ها به‌زودی اضافه می‌شود. ⏳"
+        ),
     },
     "en": {
         "choose_lang": "Please choose your language 🌐",
@@ -155,6 +99,11 @@ TEXTS = {
         "downloading_video_audio": "⏳🎧 Downloading the video and preparing the audio file... please wait",
         "done": "✅ Download complete!",
         "failed": "❌ Couldn't download it.\nError: {err}",
+        "unsupported_platform": (
+            "🚧 This platform is not supported yet.\n\n"
+            "Currently, only Instagram links can be downloaded.\n"
+            "Support for other platforms will be added soon. ⏳"
+        ),
     },
 }
 
@@ -162,6 +111,20 @@ TEXTS = {
 def t(context: ContextTypes.DEFAULT_TYPE, key: str) -> str:
     lang = context.user_data.get("lang", "fa")
     return TEXTS[lang][key]
+
+
+# ------------------------------------------------------------------
+# فقط Instagram فعال است. تمام لینک‌های سایر پلتفرم‌ها قبل از رسیدن
+# به yt-dlp متوقف می‌شوند تا هیچ درخواست غیرضروری به سرویس‌های دیگر
+# ارسال نشود.
+# ------------------------------------------------------------------
+def is_instagram_url(url: str) -> bool:
+    try:
+        parsed = urlparse(url.strip())
+        host = (parsed.hostname or "").lower().rstrip(".")
+        return host == "instagram.com" or host.endswith(".instagram.com")
+    except Exception:
+        return False
 
 
 # متن دکمه‌های زبان -> کد زبان
@@ -199,8 +162,6 @@ async def track_msg(context: ContextTypes.DEFAULT_TYPE, msg):
 
 
 async def cleanup_bot_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await track_user(update, context)
-
     """
     این هندلر با اولویت بالا (group=-1) روی هر پیام ورودی از کاربر اجرا می‌شه،
     قبل از این‌که هندلر اصلی همون پیام پردازش بشه.
@@ -279,6 +240,10 @@ async def type_chosen(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["download_type"] = media_type
 
     last_url = context.user_data.get("last_url")
+    if last_url and not is_instagram_url(last_url):
+        context.user_data.pop("last_url", None)
+        last_url = None
+
     if last_url:
         # نوع دانلود عوض شد؛ حالا می‌پرسیم همون لینک قبلی رو با فرمت جدید بگیره یا کاربر لینک تازه‌ای می‌خواد
         keyboard = ReplyKeyboardMarkup(
@@ -324,12 +289,18 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     url = update.message.text.strip()
 
-    if not url.startswith("http"):
+    if not url.startswith(("http://", "https://")):
         msg = await update.message.reply_text(t(context, "invalid_link"))
         await track_msg(context, msg)
         return
 
-    # لینک رو ذخیره می‌کنیم تا اگه بعداً کاربر فقط نوع دانلود رو عوض کرد
+    if not is_instagram_url(url):
+        msg = await update.message.reply_text(t(context, "unsupported_platform"))
+        await track_msg(context, msg)
+        return
+
+    # فقط لینک‌های Instagram ذخیره می‌شوند تا لینک پلتفرم دیگری
+    # در دانلود مجدد یا تغییر نوع دانلود وارد مسیر yt-dlp نشود.
     # (مثلاً اول صدا خواست، بعد ویدیو)، لازم نباشه لینک رو دوباره بفرسته
     context.user_data["last_url"] = url
 
@@ -340,6 +311,12 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def process_download(update: Update, context: ContextTypes.DEFAULT_TYPE, url: str):
     file_paths = []
     status_msg = None
+
+    if not is_instagram_url(url):
+        msg = await update.message.reply_text(t(context, "unsupported_platform"))
+        await track_msg(context, msg)
+        return
+
     try:
         media_type = context.user_data.get("download_type", "video_audio")
         status_key = "downloading_video_audio" if media_type == "video_audio" else "downloading"
@@ -358,7 +335,15 @@ async def process_download(update: Update, context: ContextTypes.DEFAULT_TYPE, u
         await status_msg.edit_text(t(context, "done"))
     except Exception as e:
         logger.error(f"خطا در دانلود لینک {url}: {e}", exc_info=True)
-        err_text = t(context, "failed").format(err=str(e)[:300])
+        raw_error = str(e)
+        if "429" in raw_error or "Too Many Requests" in raw_error:
+            err_text = (
+                "⚠️ اینستاگرام موقتاً تعداد درخواست‌های این ربات را محدود کرده است.\n"
+                "چند دقیقه بعد دوباره امتحان کن.\n\n"
+                "ربات برای جلوگیری از تکرار محدودیت، تعداد دانلودهای همزمان را کاهش داده است."
+            )
+        else:
+            err_text = t(context, "failed").format(err=raw_error[:300])
         try:
             if status_msg:
                 await status_msg.edit_text(err_text)
@@ -376,10 +361,17 @@ async def process_download(update: Update, context: ContextTypes.DEFAULT_TYPE, u
 
 # ---------------- تابع دانلود با yt-dlp ----------------
 def _download_binary(url: str, dest_path: str, headers=None, cookies=None, timeout=30, retries=4):
+    """دانلود stream شده با جلوگیری از ثبت فایل ناقص به‌عنوان فایل نهایی."""
     last_err = None
+
     base_headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/131.0.0.0 Safari/537.36",
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/131.0.0.0 Safari/537.36"
+        ),
         "Accept": "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
         "Referer": "https://www.instagram.com/",
     }
     if headers:
@@ -387,6 +379,7 @@ def _download_binary(url: str, dest_path: str, headers=None, cookies=None, timeo
 
     for attempt in range(1, retries + 1):
         tmp_path = dest_path + ".part"
+
         try:
             with requests.get(
                 url,
@@ -402,32 +395,42 @@ def _download_binary(url: str, dest_path: str, headers=None, cookies=None, timeo
                 if content_type and not content_type.startswith("image/"):
                     raise IOError(f"پاسخ CDN عکس نیست: {content_type}")
 
-                expected = int(resp.headers.get("Content-Length", 0) or 0)
-                got = 0
+                expected_size = int(resp.headers.get("Content-Length", 0) or 0)
+                downloaded = 0
 
                 with open(tmp_path, "wb") as f:
                     for chunk in resp.iter_content(chunk_size=128 * 1024):
                         if chunk:
                             f.write(chunk)
-                            got += len(chunk)
+                            downloaded += len(chunk)
 
-            if expected and got != expected:
-                raise IOError(f"دانلود ناقص: {got} از {expected} بایت دریافت شد")
-            if got < 1024:
-                raise IOError(f"فایل دریافت‌شده خیلی کوچک است: {got} بایت")
+                if expected_size and downloaded != expected_size:
+                    raise IOError(
+                        f"دانلود ناقص: {downloaded} از {expected_size} بایت دریافت شد"
+                    )
+
+                if downloaded < 1024:
+                    raise IOError(f"فایل دریافت‌شده خیلی کوچک است: {downloaded} بایت")
 
             os.replace(tmp_path, dest_path)
-            logger.info("دانلود کامل عکس: %d بایت", got)
+
+            logger.info(
+                "دانلود کامل %s: %d بایت دریافت شد (Content-Length: %d)",
+                url, downloaded, expected_size
+            )
             return dest_path
 
         except Exception as e:
             last_err = e
-            logger.warning("تلاش %d/%d برای دانلود عکس ناموفق بود: %s", attempt, retries, e)
+            logger.warning(
+                "تلاش %d/%d برای دانلود %s ناموفق بود: %s",
+                attempt, retries, url, e
+            )
 
-            for p in (tmp_path, dest_path):
-                if os.path.exists(p):
+            for candidate in (tmp_path, dest_path):
+                if os.path.exists(candidate):
                     try:
-                        os.remove(p)
+                        os.remove(candidate)
                     except OSError:
                         pass
 
@@ -449,116 +452,192 @@ def _strip_instagram_crop(image_url: str) -> str:
 
 
 def download_media(url: str, media_type: str = "video_audio"):
+    """
+    media_type: 'photo' یا 'video_audio'
+    خروجی: لیستی از (مسیر فایل, result_kind)
+
+    این تابع عمداً فقط Instagram را می‌پذیرد؛ این لایه‌ی دفاعی باعث
+    می‌شود حتی اگر یک مسیر داخلی اشتباهی فراخوانی شد، لینک پلتفرم دیگر
+    هرگز به yt-dlp ارسال نشود.
+    """
+    if not is_instagram_url(url):
+        raise ValueError("این پلتفرم فعلاً پشتیبانی نمی‌شود.")
+
     unique_prefix = uuid.uuid4().hex[:8]
 
     if media_type == "video_audio":
         return _download_video_with_audio(url, unique_prefix)
 
-    # عکس: اول metadata خود yt-dlp را می‌گیریم؛ لازم نیست حتماً ویدیو وجود داشته باشد.
+    # ---- حالت عکس ----
     ydl_opts = {
         "outtmpl": os.path.join(DOWNLOAD_DIR, f"{unique_prefix}_%(id)s.%(ext)s"),
         "format": "best[filesize<50M]/best",
+        # مهم: برای پست‌های عکس خالص، yt-dlp در حالت عادی
+        # با "There is no video in this post" متوقف می‌شود.
+        # با این گزینه metadata برمی‌گردد و ما thumbnail/image URL را از
+        # همان metadata می‌گیریم.
         "ignore_no_formats_error": True,
         "noplaylist": True,
         "quiet": False,
         "no_warnings": False,
         "overwrites": True,
+        "concurrent_fragment_downloads": 1,
         "socket_timeout": 30,
-        "retries": 5,
-        "fragment_retries": 5,
+        "retries": 2,
+        "fragment_retries": 2,
+        "sleep_interval_requests": 1,
+        "max_sleep_interval_requests": 3,
         "nocheckcertificate": True,
+        "http_headers": {
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/131.0.0.0 Safari/537.36"
+            ),
+            "Referer": "https://www.instagram.com/",
+            "Accept-Language": "en-US,en;q=0.9",
+        },
         "cookiefile": COOKIE_FILE,
     }
 
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        info = ydl.extract_info(url, download=False)
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=True)
 
-    image_urls = []
+            # اگر واقعاً فایل ویدیویی/تصویری توسط yt-dlp ساخته شده باشد
+            file_path = ydl.prepare_filename(info)
 
-    def add_url(value):
-        if isinstance(value, str) and value.startswith(("http://", "https://")):
-            if value not in image_urls:
-                image_urls.append(value)
+        if os.path.exists(file_path) and os.path.getsize(file_path) > 0:
+            ext = file_path.rsplit(".", 1)[-1].lower()
+            if ext in ["mp4", "mkv", "webm", "mov"]:
+                # عکس خواسته شده؛ از thumbnail استفاده می‌کنیم.
+                pass
+            else:
+                return [(file_path, "photo")]
 
-    def collect(item):
-        if not isinstance(item, dict):
-            return
-        add_url(item.get("thumbnail"))
-        add_url(item.get("display_url"))
-        for thumb in item.get("thumbnails") or []:
+        # برای Instagram photo post، اطلاعات تصویر داخل metadata می‌آید.
+        image_urls = []
+
+        def add_url(value):
+            if isinstance(value, str) and value.startswith(("http://", "https://")):
+                if value not in image_urls:
+                    image_urls.append(value)
+
+        add_url(info.get("thumbnail"))
+        add_url(info.get("display_url"))
+
+        # yt-dlp برای Instagram image_versions2 را معمولاً در thumbnails می‌دهد.
+        for thumb in info.get("thumbnails") or []:
             if isinstance(thumb, dict):
                 add_url(thumb.get("url"))
 
-    collect(info)
-    for entry in info.get("entries") or []:
-        collect(entry)
+        # اگر metadata به شکل playlist برگشته باشد (carousel)
+        for entry in info.get("entries") or []:
+            if not entry:
+                continue
+            add_url(entry.get("thumbnail"))
+            add_url(entry.get("display_url"))
+            for thumb in entry.get("thumbnails") or []:
+                if isinstance(thumb, dict):
+                    add_url(thumb.get("url"))
 
-    logger.info("yt-dlp metadata: %d URL عکس پیدا شد", len(image_urls))
+        # از آخرین/بالاترین کیفیت‌ها شروع نکنیم؛ URLهای تکراری را حذف کرده‌ایم.
+        # اول URLهایی که رزولوشن بالاتری دارند را امتحان می‌کنیم.
+        def thumb_score(u):
+            m = re.search(r'[_-](\d{3,5})x(\d{3,5})', u)
+            if m:
+                return int(m.group(1)) * int(m.group(2))
+            return 0
 
-    # فقط fallback نهایی؛ نه مسیر اصلی.
-    if not image_urls:
-        fallback = _extract_og_image(url)
-        if fallback:
-            image_urls.append(fallback)
+        image_urls.sort(key=thumb_score, reverse=True)
 
-    if not image_urls:
-        raise RuntimeError(
-            "yt-dlp اطلاعات پست را گرفت، اما URL عکس داخل metadata پیدا نشد."
+        logger.info("Instagram metadata: %d image URL found", len(image_urls))
+
+        if not image_urls:
+            # فقط در این حالت سراغ fallback قدیمی می‌رویم.
+            image_url = _extract_og_image(url)
+            if image_url:
+                image_urls.append(image_url)
+
+        if not image_urls:
+            raise RuntimeError(
+                "yt-dlp اطلاعات پست را گرفت، اما URL عکس داخل metadata پیدا نشد."
+            )
+
+        img_path = os.path.join(DOWNLOAD_DIR, f"{unique_prefix}_photo.jpg")
+
+        common_kwargs = dict(
+            headers={
+                "User-Agent": (
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/131.0.0.0 Safari/537.36"
+                ),
+                "Accept": "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
+                "Referer": "https://www.instagram.com/",
+            },
+            cookies=_load_cookie_jar(),
+            timeout=30,
+            retries=4,
         )
 
-    img_path = os.path.join(DOWNLOAD_DIR, f"{unique_prefix}_photo.jpg")
-    last_error = None
+        last_error = None
 
-    for image_url in image_urls:
-        try:
-            logger.info("تلاش برای دانلود عکس: %s", image_url)
-            _download_binary(
-                image_url,
-                img_path,
-                headers={
-                    "Accept": "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
-                    "Referer": "https://www.instagram.com/",
-                },
-                cookies=_load_cookie_jar(),
-                timeout=30,
-                retries=4,
-            )
+        for image_url in image_urls:
+            try:
+                logger.info("تلاش برای دانلود عکس از metadata: %s", image_url)
 
-            with open(img_path, "rb") as f:
-                header = f.read(16)
+                _download_binary(image_url, img_path, **common_kwargs)
 
-            valid = (
-                header.startswith(b"\xff\xd8\xff") or
-                header.startswith(b"\x89PNG\r\n\x1a\n") or
-                (header.startswith(b"RIFF") and header[8:12] == b"WEBP") or
-                header.startswith(b"GIF87a") or
-                header.startswith(b"GIF89a")
-            )
-            if not valid:
-                raise IOError("فایل دریافت‌شده تصویر معتبر نیست.")
+                # بررسی ساده‌ی فایل تصویر با signature تا HTML/error page
+                # به‌عنوان عکس ذخیره نشود.
+                with open(img_path, "rb") as f:
+                    header = f.read(16)
 
-            return [(img_path, "photo")]
+                valid_image = (
+                    header.startswith(b"\xff\xd8\xff")      # JPEG
+                    or header.startswith(b"\x89PNG\r\n\x1a\n")  # PNG
+                    or header.startswith(b"RIFF") and header[8:12] == b"WEBP"
+                    or header.startswith(b"GIF87a")
+                    or header.startswith(b"GIF89a")
+                )
 
-        except Exception as e:
-            last_error = e
-            logger.warning("این URL عکس قابل دانلود نبود: %s", e)
-            if os.path.exists(img_path):
-                try:
-                    os.remove(img_path)
-                except OSError:
-                    pass
+                if not valid_image:
+                    raise IOError("فایل دریافت‌شده signature معتبر تصویر ندارد.")
 
-    raise last_error or RuntimeError("هیچ URL عکس قابل دانلود نبود.")
+                return [(img_path, "photo")]
+
+            except Exception as e:
+                last_error = e
+                logger.warning("دانلود این URL عکس شکست خورد: %s", e)
+
+                if os.path.exists(img_path):
+                    try:
+                        os.remove(img_path)
+                    except OSError:
+                        pass
+
+        raise last_error or RuntimeError("هیچ‌کدام از URLهای عکس قابل دانلود نبودند.")
+
+    except Exception as e:
+        logger.warning("دانلود عکس با yt-dlp/metadata شکست خورد: %s", e)
+        raise
 
 
 
 def _extract_og_image(url: str):
+    """Fallback نهایی برای استخراج URL عکس از HTML."""
     try:
         resp = requests.get(
             url,
             headers={
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/131.0.0.0 Safari/537.36",
+                "User-Agent": (
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/131.0.0.0 Safari/537.36"
+                ),
                 "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                "Accept-Language": "en-US,en;q=0.9",
                 "Referer": "https://www.instagram.com/",
             },
             cookies=_load_cookie_jar(),
@@ -570,23 +649,38 @@ def _extract_og_image(url: str):
         return None
 
     html = resp.text
+
     patterns = [
         r'"display_url"\s*:\s*"([^"]+)"',
         r'"thumbnail_src"\s*:\s*"([^"]+)"',
         r'"display_src"\s*:\s*"([^"]+)"',
         r'property="og:image"\s+content="([^"]+)"',
         r'content="([^"]+)"\s+property="og:image"',
-        r'<meta[^>]+(?:name|property)="twitter:image"[^>]+content="([^"]+)"',
+        r'<meta[^>]+name="twitter:image"[^>]+content="([^"]+)"',
+        r'<meta[^>]+property="twitter:image"[^>]+content="([^"]+)"',
     ]
 
     for pattern in patterns:
-        m = re.search(pattern, html, re.I | re.S)
-        if m:
-            raw = m.group(1)
+        match = re.search(pattern, html, re.I | re.S)
+        if match:
+            raw_url = match.group(1)
             try:
-                return json.loads(f'"{raw}"')
+                return json.loads(f'"{raw_url}"')
             except Exception:
-                return raw.replace("\\/", "/").replace("&amp;", "&")
+                return raw_url.replace("\\/", "/").replace("&amp;", "&")
+
+    # آخرین تلاش: URLهای مستقیم CDN اینستاگرام که داخل پاسخ HTML/JSON دیده می‌شوند.
+    cdn_matches = re.findall(
+        r'https?:\\/\\/(?:scontent[^"\'\s<]+|[^"\'\s<]*cdninstagram\.com[^"\'\s<]+)',
+        html,
+        re.I,
+    )
+    if cdn_matches:
+        cleaned = [
+            x.replace("\\/", "/").replace("&amp;", "&")
+            for x in cdn_matches
+        ]
+        return max(cleaned, key=len)
 
     return None
 
@@ -596,67 +690,8 @@ def _extract_og_image(url: str):
 COOKIE_SOURCE = "/etc/secrets/cookies.txt"
 COOKIE_FILE = os.path.join(DOWNLOAD_DIR, "cookies.txt")
 
-YOUTUBE_COOKIE_SOURCE = "/etc/secrets/youtube_cookies.txt"
-YOUTUBE_COOKIE_FILE = os.path.join(DOWNLOAD_DIR, "youtube_cookies.txt")
-
 if os.path.exists(COOKIE_SOURCE):
     shutil.copy2(COOKIE_SOURCE, COOKIE_FILE)
-
-if os.path.exists(YOUTUBE_COOKIE_SOURCE):
-    shutil.copy2(YOUTUBE_COOKIE_SOURCE, YOUTUBE_COOKIE_FILE)
-
-
-try:
-    with open(YOUTUBE_COOKIE_FILE, "r", encoding="utf-8", errors="ignore") as f:
-        lines = f.readlines()
-
-    domains = set()
-    cookie_count = 0
-
-    for line in lines:
-        line = line.strip()
-
-        if not line or line.startswith("#"):
-            continue
-
-        parts = line.split()
-
-        if len(parts) >= 1:
-            domains.add(parts[0])
-            cookie_count += 1
-
-    print("YOUTUBE COOKIE COUNT:", cookie_count, flush=True)
-    print("YOUTUBE COOKIE DOMAINS:", sorted(domains), flush=True)
-
-except Exception as e:
-    print("YOUTUBE COOKIE CHECK ERROR:", str(e), flush=True)
-
-except Exception as e:
-    print("YOUTUBE COOKIE CHECK ERROR:", str(e), flush=True)
-
-
-try:
-    with open(COOKIE_FILE, "r", encoding="utf-8", errors="ignore") as f:
-        lines = f.readlines()
-
-    domains = set()
-
-    for line in lines:
-        line = line.strip()
-
-        if not line or line.startswith("#"):
-            continue
-
-        parts = line.split("\t")
-
-        if len(parts) >= 1:
-            domains.add(parts[0])
-
-    print("COOKIE COUNT:", len(lines), flush=True)
-    print("COOKIE DOMAINS:", sorted(domains), flush=True)
-
-except Exception as e:
-    print("COOKIE DOMAIN CHECK ERROR:", str(e), flush=True)
 
 
 def _load_cookie_jar():
@@ -679,9 +714,6 @@ print("=== COOKIE TEST ===", flush=True)
 print("SOURCE:", os.path.exists(COOKIE_SOURCE), flush=True)
 print("COPIED:", os.path.exists(COOKIE_FILE), flush=True)
 
-print("YOUTUBE SOURCE:", os.path.exists(YOUTUBE_COOKIE_SOURCE), flush=True)
-print("YOUTUBE COPIED:", os.path.exists(YOUTUBE_COOKIE_FILE), flush=True)
-
 
 
 # ---------------- دانلود ویدیو (با صدای سالم داخلش) + استخراج یه فایل صدای جداگانه ----------------
@@ -695,15 +727,26 @@ def _download_video_with_audio(url: str, unique_prefix: str):
         "format": "bestvideo*+bestaudio/best",
         "merge_output_format": "mp4",
         "noplaylist": True,
-        "quiet": False,
-        "no_warnings": False,
+        "quiet": True,
+        "no_warnings": True,
         "overwrites": True,
-        "concurrent_fragment_downloads": 8,
+        "concurrent_fragment_downloads": 1,
         "socket_timeout": 30,
-        "retries": 5,
-        "fragment_retries": 5,
+        "retries": 2,
+        "fragment_retries": 2,
+        "sleep_interval_requests": 1,
+        "max_sleep_interval_requests": 3,
         "nocheckcertificate": True,
-        "cookiefile": YOUTUBE_COOKIE_FILE,
+        "http_headers": {
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/131.0.0.0 Safari/537.36"
+            ),
+            "Referer": "https://www.instagram.com/",
+            "Accept-Language": "en-US,en;q=0.9",
+        },
+        "cookiefile": COOKIE_FILE,
     }
 
     logger.info("YT-DLP: شروع دانلود %s", url)
@@ -861,7 +904,6 @@ def main():
     # و قبل از پردازش پیام جدید، پیام‌های متنی ربات از نوبت قبل رو پاک می‌کنه
     app.add_handler(MessageHandler(filters.ALL, cleanup_bot_messages), group=-1)
 
-    app.add_handler(CommandHandler("stats", stats_command))
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("type", change_type))
     app.add_handler(CommandHandler("newlink", new_link))
