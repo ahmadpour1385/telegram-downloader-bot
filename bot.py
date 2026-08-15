@@ -593,6 +593,27 @@ if os.path.exists(COOKIE_SOURCE):
     shutil.copy2(COOKIE_SOURCE, COOKIE_FILE)
 
 
+try:
+    with open(COOKIE_FILE, "r", encoding="utf-8", errors="ignore") as f:
+        lines = f.readlines()
+
+    cookie_lines = [
+        line for line in lines
+        if line.strip() and not line.startswith("#")
+    ]
+
+    youtube_lines = [
+        line for line in cookie_lines
+        if "youtube.com" in line or "google.com" in line
+    ]
+
+    print("COOKIE LINES:", len(cookie_lines), flush=True)
+    print("YOUTUBE/GOOGLE COOKIE LINES:", len(youtube_lines), flush=True)
+
+except Exception as e:
+    print("COOKIE CHECK ERROR:", str(e), flush=True)
+
+
 def _load_cookie_jar():
     """
     کوکی‌های اینستاگرام رو (همون فایلی که به yt-dlp هم داده میشه) برای
