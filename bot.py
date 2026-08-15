@@ -597,21 +597,24 @@ try:
     with open(COOKIE_FILE, "r", encoding="utf-8", errors="ignore") as f:
         lines = f.readlines()
 
-    cookie_lines = [
-        line for line in lines
-        if line.strip() and not line.startswith("#")
-    ]
+    domains = set()
 
-    youtube_lines = [
-        line for line in cookie_lines
-        if "youtube.com" in line or "google.com" in line
-    ]
+    for line in lines:
+        line = line.strip()
 
-    print("COOKIE LINES:", len(cookie_lines), flush=True)
-    print("YOUTUBE/GOOGLE COOKIE LINES:", len(youtube_lines), flush=True)
+        if not line or line.startswith("#"):
+            continue
+
+        parts = line.split("\t")
+
+        if len(parts) >= 1:
+            domains.add(parts[0])
+
+    print("COOKIE COUNT:", len(lines), flush=True)
+    print("COOKIE DOMAINS:", sorted(domains), flush=True)
 
 except Exception as e:
-    print("COOKIE CHECK ERROR:", str(e), flush=True)
+    print("COOKIE DOMAIN CHECK ERROR:", str(e), flush=True)
 
 
 def _load_cookie_jar():
