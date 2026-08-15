@@ -589,8 +589,14 @@ def _extract_og_image(url: str):
 COOKIE_SOURCE = "/etc/secrets/cookies.txt"
 COOKIE_FILE = os.path.join(DOWNLOAD_DIR, "cookies.txt")
 
+YOUTUBE_COOKIE_SOURCE = "/etc/secrets/youtube_cookies.txt"
+YOUTUBE_COOKIE_FILE = os.path.join(DOWNLOAD_DIR, "youtube_cookies.txt")
+
 if os.path.exists(COOKIE_SOURCE):
     shutil.copy2(COOKIE_SOURCE, COOKIE_FILE)
+
+if os.path.exists(YOUTUBE_COOKIE_SOURCE):
+    shutil.copy2(YOUTUBE_COOKIE_SOURCE, YOUTUBE_COOKIE_FILE)
 
 
 try:
@@ -636,6 +642,9 @@ def _load_cookie_jar():
 print("=== COOKIE TEST ===", flush=True)
 print("SOURCE:", os.path.exists(COOKIE_SOURCE), flush=True)
 print("COPIED:", os.path.exists(COOKIE_FILE), flush=True)
+
+print("YOUTUBE SOURCE:", os.path.exists(YOUTUBE_COOKIE_SOURCE), flush=True)
+print("YOUTUBE COPIED:", os.path.exists(YOUTUBE_COOKIE_FILE), flush=True)
 
 
 
