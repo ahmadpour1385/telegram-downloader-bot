@@ -26,7 +26,12 @@ from telegram.ext import (
     filters,
 )
 os.environ["PATH"] += os.pathsep + os.path.expanduser("~/.deno/bin")
+DENO_PATH = os.path.expanduser("~/.deno/bin")
+os.environ["PATH"] = DENO_PATH + os.pathsep + os.environ.get("PATH", "")
 
+print("=== DENO TEST ===", flush=True)
+print("DENO PATH:", DENO_PATH, flush=True)
+print("DENO EXISTS:", os.path.exists(os.path.join(DENO_PATH, "deno")), flush=True)
 
 # ---------------- تنظیمات ----------------
 load_dotenv()  # مقادیر رو از فایل .env می‌خونه
