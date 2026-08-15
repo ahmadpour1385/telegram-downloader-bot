@@ -25,6 +25,8 @@ from telegram.ext import (
     AIORateLimiter,
     filters,
 )
+os.environ["PATH"] += os.pathsep + os.path.expanduser("~/.deno/bin")
+
 
 # ---------------- تنظیمات ----------------
 load_dotenv()  # مقادیر رو از فایل .env می‌خونه
