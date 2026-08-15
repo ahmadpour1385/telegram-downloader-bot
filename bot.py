@@ -696,7 +696,7 @@ def _download_video_with_audio(url: str, unique_prefix: str):
         "retries": 5,
         "fragment_retries": 5,
         "nocheckcertificate": True,
-        "cookiefile": COOKIE_FILE,
+        "cookiefile": YOUTUBE_COOKIE_FILE,
     }
 
     logger.info("YT-DLP: شروع دانلود %s", url)
