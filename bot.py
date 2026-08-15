@@ -598,12 +598,13 @@ if os.path.exists(COOKIE_SOURCE):
 if os.path.exists(YOUTUBE_COOKIE_SOURCE):
     shutil.copy2(YOUTUBE_COOKIE_SOURCE, YOUTUBE_COOKIE_FILE)
 
-    
+
 try:
     with open(YOUTUBE_COOKIE_FILE, "r", encoding="utf-8", errors="ignore") as f:
         lines = f.readlines()
 
     domains = set()
+    cookie_count = 0
 
     for line in lines:
         line = line.strip()
@@ -611,13 +612,17 @@ try:
         if not line or line.startswith("#"):
             continue
 
-        parts = line.split("\t")
+        parts = line.split()
 
         if len(parts) >= 1:
             domains.add(parts[0])
+            cookie_count += 1
 
-    print("YOUTUBE COOKIE COUNT:", len(lines), flush=True)
+    print("YOUTUBE COOKIE COUNT:", cookie_count, flush=True)
     print("YOUTUBE COOKIE DOMAINS:", sorted(domains), flush=True)
+
+except Exception as e:
+    print("YOUTUBE COOKIE CHECK ERROR:", str(e), flush=True)
 
 except Exception as e:
     print("YOUTUBE COOKIE CHECK ERROR:", str(e), flush=True)
