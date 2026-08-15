@@ -1,19 +1,43 @@
-from flask import Flask
-from threading import Thread
-from threading import Thread
+"""
+ربات تلگرامی دانلودر اینستاگرام (عکس / ویدیو + صدا)
+======================================================
+ساختار فایل:
+    1) تنظیمات و پیکربندی (env, مسیرها, لاگ)
+    2) متن‌های چندزبانه (i18n) + نگاشت دکمه‌ها
+    3) ابزار پاکسازی چت (حذف پیام‌های قبلی ربات/کاربر)
+    4) هندلرهای تلگرام (start / انتخاب زبان / انتخاب نوع / دریافت لینک ...)
+    5) موتور دانلود:
+         - تشخیص پلتفرم (فعلاً فقط اینستاگرام پشتیبانی می‌شود)
+         - مدیریت کوکی اینستاگرام
+         - دانلود عکس اینستاگرام (چند لایه fallback، بدون کرش)
+         - دانلود ویدیو + استخراج صدا (بدون تغییر منطق قبلی)
+    6) ارسال فایل به کاربر
+    7) هندلر خطای سراسری
+    8) Keep-Alive (Flask) برای Render + UptimeRobot
+    9) اجرای ربات (main)
+"""
+
+# ============================================================
+# 1) تنظیمات و پیکربندی
+# ============================================================
 import os
 import re
 import json
+import time
 import uuid
+import shutil
 import asyncio
 import logging
 import subprocess
-import shutil
 import http.cookiejar
+from threading import Thread
+from urllib.parse import urlparse
 from concurrent.futures import ThreadPoolExecutor
+
 import requests
 import yt_dlp
 from dotenv import load_dotenv
+from flask import Flask
 from telegram import Update, ReplyKeyboardMarkup, ReplyKeyboardRemove, BotCommand, MenuButtonCommands
 from telegram.ext import (
     ApplicationBuilder,
@@ -25,7 +49,6 @@ from telegram.ext import (
     filters,
 )
 
-# ---------------- تنظیمات ----------------
 load_dotenv()  # مقادیر رو از فایل .env می‌خونه
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
@@ -38,18 +61,33 @@ if not BOT_TOKEN:
 DOWNLOAD_DIR = "downloads"
 PERSISTENCE_FILE = "bot_data.pkl"
 
+# مسیر کوکی اینستاگرام: روی Render از Secret File خونده و توی DOWNLOAD_DIR کپی می‌شه
+COOKIE_SOURCE = "/etc/secrets/cookies.txt"
+COOKIE_FILE = os.path.join(DOWNLOAD_DIR, "cookies.txt")
+
 # ترد پول اختصاصی برای دانلود، مستقل از تعداد هسته‌ی CPU سرور
 DOWNLOAD_EXECUTOR = ThreadPoolExecutor(max_workers=20)
 
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
+if os.path.exists(COOKIE_SOURCE):
+    shutil.copy2(COOKIE_SOURCE, COOKIE_FILE)
+
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    level=logging.INFO
+    level=logging.INFO,
 )
 logger = logging.getLogger(__name__)
 
-# ---------------- متن‌های دو زبانه ----------------
+logger.info("بررسی کوکی اینستاگرام | source=%s copied=%s", os.path.exists(COOKIE_SOURCE), os.path.exists(COOKIE_FILE))
+
+# پلتفرم‌هایی که فعلاً پشتیبانی می‌شن. هر پلتفرم جدید بعداً فقط باید اینجا اضافه بشه.
+SUPPORTED_DOMAINS = ("instagram.com", "instagr.am")
+
+
+# ============================================================
+# 2) متن‌های چندزبانه (i18n)
+# ============================================================
 TEXTS = {
     "fa": {
         "choose_lang": "لطفاً زبان مورد نظرت رو انتخاب کن 🌐",
@@ -60,7 +98,7 @@ TEXTS = {
         "choose_type": "می‌خوای عکس بگیری یا ویدیو رو همراه با فایل صدای جداگانه‌اش دانلود کنی؟",
         "photo_btn": "📷 عکس",
         "video_audio_btn": "🎬🎵 ویدیو + صدا",
-        "type_saved": "باشه! حالا لینکت رو برام بفرست 🔗",
+        "type_saved": "باشه! حالا لینک اینستاگرامت رو برام بفرست 🔗",
         "start_choice": "دوباره خوش اومدی! 👋\nمی‌خوای همون لینک قبلی رو دوباره دانلود کنم یا یه لینک جدید برام بفرستی؟",
         "prev_link_btn": "🔁 لینک قبلی",
         "new_link_btn": "🆕 لینک جدید",
@@ -72,6 +110,11 @@ TEXTS = {
         "downloading_video_audio": "⏳🎧 در حال دانلود ویدیو و آماده‌سازی فایل صدا... چند لحظه صبر کن",
         "done": "✅ دانلود انجام شد!",
         "failed": "❌ نشد دانلودش کنم.\nخطا: {err}",
+        "other_platform": (
+            "🚧 فعلاً ربات فقط از اینستاگرام پشتیبانی می‌کنه.\n"
+            "پشتیبانی از پلتفرم‌های دیگه به‌زودی اضافه می‌شه، منتظر بمون! 🙌\n\n"
+            "لطفاً یه لینک اینستاگرام برام بفرست 🔗"
+        ),
     },
     "en": {
         "choose_lang": "Please choose your language 🌐",
@@ -82,7 +125,7 @@ TEXTS = {
         "choose_type": "Do you want a photo, or a video with its audio as a separate file too?",
         "photo_btn": "📷 Photo",
         "video_audio_btn": "🎬🎵 Video + Audio",
-        "type_saved": "Got it! Now send me the link 🔗",
+        "type_saved": "Got it! Now send me your Instagram link 🔗",
         "start_choice": "Welcome back! 👋\nDo you want the same previous link again, or will you send a new one?",
         "prev_link_btn": "🔁 Previous link",
         "new_link_btn": "🆕 New link",
@@ -94,6 +137,11 @@ TEXTS = {
         "downloading_video_audio": "⏳🎧 Downloading the video and preparing the audio file... please wait",
         "done": "✅ Download complete!",
         "failed": "❌ Couldn't download it.\nError: {err}",
+        "other_platform": (
+            "🚧 Right now the bot only supports Instagram.\n"
+            "Support for other platforms is coming soon, stay tuned! 🙌\n\n"
+            "Please send me an Instagram link 🔗"
+        ),
     },
 }
 
@@ -122,9 +170,9 @@ for _lang_code, _texts in TEXTS.items():
     START_CHOICE_LABEL_TO_ACTION[_texts["new_link_btn"]] = "new"
 
 
-# ==================================================================
-# ------- ابزار پاکسازی چت: ردیابی و حذف پیام‌های متنی ربات -------
-# ==================================================================
+# ============================================================
+# 3) ابزار پاکسازی چت: ردیابی و حذف پیام‌های متنی ربات
+# ============================================================
 async def track_msg(context: ContextTypes.DEFAULT_TYPE, msg):
     """
     message_id هر پیام متنی/راهنمای ربات رو ذخیره می‌کنه تا سر فرصت
@@ -168,9 +216,11 @@ async def cleanup_bot_messages(update: Update, context: ContextTypes.DEFAULT_TYP
         context.user_data["last_user_msg_id"] = current_msg_id
 
 
-# ---------------- دستور /start: انتخاب زبان، یا اگه قبلاً زبان داشته مستقیم بره سراغ انتخاب نوع دانلود ----------------
+# ============================================================
+# 4) هندلرهای تلگرام
+# ============================================================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # هر بار /start زده بشه، از اول شروع می‌کنیم و دوباره سؤال زبان پرسیده می‌شه
+    """هر بار /start زده بشه، از اول شروع می‌کنیم و دوباره سؤال زبان پرسیده می‌شه."""
     keyboard = ReplyKeyboardMarkup(
         [["فارسی 🇮🇷", "English 🇬🇧"]],
         resize_keyboard=True,
@@ -183,8 +233,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await track_msg(context, msg)
 
 
-# ---------------- انتخاب زبان (پیام متنی از کیبورد پایین) ----------------
 async def lang_chosen(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """انتخاب زبان (پیام متنی از کیبورد پایین)."""
     lang = LANG_LABEL_TO_CODE[update.message.text]
     context.user_data["lang"] = lang
 
@@ -198,8 +248,8 @@ async def lang_chosen(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await track_msg(context, msg)
 
 
-# ---------------- دستور /type: تغییر سریع نوع دانلود بدون نیاز به /start ----------------
 async def change_type(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """دستور /type: تغییر سریع نوع دانلود بدون نیاز به /start."""
     context.user_data.setdefault("lang", "fa")
     keyboard = ReplyKeyboardMarkup(
         [[t(context, "photo_btn"), t(context, "video_audio_btn")]],
@@ -210,8 +260,8 @@ async def change_type(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await track_msg(context, msg)
 
 
-# ---------------- انتخاب نوع دانلود (عکس/ویدیو/صدا) از کیبورد پایین ----------------
 async def type_chosen(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """انتخاب نوع دانلود (عکس/ویدیو+صدا) از کیبورد پایین."""
     media_type = TYPE_LABEL_TO_TYPE[update.message.text]
     context.user_data["download_type"] = media_type
 
@@ -230,8 +280,8 @@ async def type_chosen(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await track_msg(context, msg)
 
 
-# ---------------- جواب به سوال «لینک قبلی یا لینک جدید» (بعد از /start یا تغییر نوع دانلود) ----------------
 async def start_choice_chosen(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """جواب به سوال «لینک قبلی یا لینک جدید» (بعد از /start یا تغییر نوع دانلود)."""
     action = START_CHOICE_LABEL_TO_ACTION[update.message.text]
 
     if action == "prev":
@@ -244,16 +294,16 @@ async def start_choice_chosen(update: Update, context: ContextTypes.DEFAULT_TYPE
         await track_msg(context, msg)
 
 
-# ---------------- دستور /newlink: ارسال لینک جدید برای همون نوع دانلود قبلی ----------------
 async def new_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """دستور /newlink: ارسال لینک جدید برای همون نوع دانلود قبلی."""
     context.user_data.setdefault("lang", "fa")
     context.user_data.setdefault("download_type", "video_audio")
     msg = await update.message.reply_text(t(context, "send_new_link"), reply_markup=ReplyKeyboardRemove())
     await track_msg(context, msg)
 
 
-# ---------------- هندلر اصلی: دریافت لینک ----------------
 async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """هندلر اصلی: دریافت لینک از کاربر."""
     # اگه کاربر هنوز زبان/نوع دانلود رو انتخاب نکرده (کاربر جدید یا داده از دست رفته)
     # به‌جای گیر دادن، مقدار پیش‌فرض می‌ذاریم تا لینک همیشه کار کنه
     context.user_data.setdefault("lang", "fa")
@@ -261,23 +311,35 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     url = update.message.text.strip()
 
-    if not url.startswith("http"):
+    if not url.startswith(("http://", "https://")):
         msg = await update.message.reply_text(t(context, "invalid_link"))
         await track_msg(context, msg)
         return
 
+    # فعلاً فقط اینستاگرام پشتیبانی می‌شه؛ برای بقیه پلتفرم‌ها پیام «به‌زودی» می‌فرستیم
+    if not is_supported_platform(url):
+        msg = await update.message.reply_text(t(context, "other_platform"))
+        await track_msg(context, msg)
+        return
+
     # لینک رو ذخیره می‌کنیم تا اگه بعداً کاربر فقط نوع دانلود رو عوض کرد
-    # (مثلاً اول صدا خواست، بعد ویدیو)، لازم نباشه لینک رو دوباره بفرسته
+    # (مثلاً اول عکس خواست، بعد ویدیو)، لازم نباشه لینک رو دوباره بفرسته
     context.user_data["last_url"] = url
 
     await process_download(update, context, url)
 
 
-# ---------------- منطق مشترک دانلود و ارسال فایل ----------------
 async def process_download(update: Update, context: ContextTypes.DEFAULT_TYPE, url: str):
+    """منطق مشترک دانلود و ارسال فایل."""
     file_paths = []
     status_msg = None
     try:
+        # لایه‌ی محافظتی اضافه: حتی برای لینک قبلی (prev) هم پلتفرم رو دوباره چک می‌کنیم
+        if not is_supported_platform(url):
+            msg = await update.message.reply_text(t(context, "other_platform"))
+            await track_msg(context, msg)
+            return
+
         media_type = context.user_data.get("download_type", "video_audio")
         status_key = "downloading_video_audio" if media_type == "video_audio" else "downloading"
         status_msg = await update.message.reply_text(t(context, status_key))
@@ -294,7 +356,7 @@ async def process_download(update: Update, context: ContextTypes.DEFAULT_TYPE, u
             await send_file(update, context, file_path, result_kind)
         await status_msg.edit_text(t(context, "done"))
     except Exception as e:
-        logger.error(f"خطا در دانلود لینک {url}: {e}", exc_info=True)
+        logger.error("خطا در دانلود لینک %s: %s", url, e, exc_info=True)
         err_text = t(context, "failed").format(err=str(e)[:300])
         try:
             if status_msg:
@@ -311,17 +373,55 @@ async def process_download(update: Update, context: ContextTypes.DEFAULT_TYPE, u
                 os.remove(file_path)
 
 
-# ---------------- تابع دانلود با yt-dlp ----------------
+# ============================================================
+# 5) موتور دانلود
+# ============================================================
+def is_supported_platform(url: str) -> bool:
+    """
+    فقط لینک‌های اینستاگرام (instagram.com / instagr.am) رو تایید می‌کنه.
+    این تابع تنها نقطه‌ایه که باید عوض بشه وقتی پلتفرم جدید اضافه می‌کنیم.
+    """
+    try:
+        netloc = urlparse(url).netloc.lower()
+    except Exception:
+        return False
+
+    # حذف user:pass@ احتمالی جلوی دامنه
+    netloc = netloc.split("@")[-1]
+    # حذف پورت احتمالی (مثلاً :443)
+    netloc = netloc.split(":")[0]
+
+    return any(netloc == domain or netloc.endswith("." + domain) for domain in SUPPORTED_DOMAINS)
+
+
+def _load_cookie_jar():
+    """
+    کوکی‌های اینستاگرام رو (همون فایلی که به yt-dlp هم داده میشه) برای
+    درخواست‌های مستقیم requests (گرفتن og:image و خودِ عکس) لود می‌کنه.
+    بدون این کوکی‌ها، اینستاگرام گاهی نسخه محدود/ناقصی از صفحه یا عکس رو برمی‌گردونه.
+    """
+    jar = http.cookiejar.MozillaCookieJar()
+    if os.path.exists(COOKIE_FILE):
+        try:
+            jar.load(COOKIE_FILE, ignore_discard=True, ignore_expires=True)
+        except Exception as e:
+            logger.warning("لود کردن فایل کوکی شکست خورد: %s", e)
+    return jar
+
+
+DEFAULT_UA = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/131.0.0.0 Safari/537.36"
+)
+
+
 def _download_binary(url: str, dest_path: str, headers=None, cookies=None, timeout=30, retries=4):
     """دانلود stream شده با جلوگیری از ثبت فایل ناقص به‌عنوان فایل نهایی."""
     last_err = None
 
     base_headers = {
-        "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/131.0.0.0 Safari/537.36"
-        ),
+        "User-Agent": DEFAULT_UA,
         "Accept": "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
         "Accept-Language": "en-US,en;q=0.9",
         "Referer": "https://www.instagram.com/",
@@ -387,11 +487,9 @@ def _download_binary(url: str, dest_path: str, headers=None, cookies=None, timeo
                         pass
 
             if attempt < retries:
-                import time
                 time.sleep(min(2 * attempt, 6))
 
     raise last_err
-
 
 
 def _strip_instagram_crop(image_url: str) -> str:
@@ -403,223 +501,17 @@ def _strip_instagram_crop(image_url: str) -> str:
     return re.sub(r"c\d+\.\d+\.\d+\.\d+a_", "", image_url)
 
 
-def download_media(url: str, media_type: str = "video_audio"):
-    """
-    media_type: 'photo' یا 'video_audio'
-    خروجی: لیستی از (مسیر فایل, result_kind)
-
-    نکته مهم:
-    برای عکس Instagram هیچ دانلودی توسط yt-dlp انجام نمی‌دهیم.
-    yt-dlp فقط metadata را استخراج می‌کند و فایل تصویر مستقیماً
-    از URL تصویر دریافت می‌شود. این کار جلوی خطای
-    "No video formats found!" برای پست‌های عکس خالص را می‌گیرد.
-    """
-    unique_prefix = uuid.uuid4().hex[:8]
-
-    if media_type == "video_audio":
-        return _download_video_with_audio(url, unique_prefix)
-
-    if media_type != "photo":
-        raise ValueError(f"media_type نامعتبر است: {media_type}")
-
-    # ---------------------------------------------------------
-    # Instagram PHOTO
-    # ---------------------------------------------------------
-    # download=False بسیار مهم است؛ برای پست عکس خالص نباید yt-dlp
-    # وارد مرحله دانلود/جستجوی video formats شود.
-    ydl_opts = {
-        "outtmpl": os.path.join(
-            DOWNLOAD_DIR,
-            f"{unique_prefix}_%(id)s.%(ext)s"
-        ),
-        "noplaylist": False,
-        "quiet": False,
-        "no_warnings": False,
-        "socket_timeout": 30,
-        "retries": 2,
-        "fragment_retries": 2,
-        "nocheckcertificate": True,
-        "cookiefile": COOKIE_FILE,
-        "ignore_no_formats_error": True,
-    }
-
-    try:
-        logger.info("Instagram PHOTO: extracting metadata only: %s", url)
-
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            # عمداً download=False
-            info = ydl.extract_info(url, download=False)
-
-        if not info:
-            raise RuntimeError(
-                "Instagram اطلاعات پست را برنگرداند."
-            )
-
-        image_urls = []
-
-        def add_url(value):
-            if isinstance(value, str):
-                value = value.strip()
-                if value.startswith(("http://", "https://")):
-                    if value not in image_urls:
-                        image_urls.append(value)
-
-        def collect_image_urls(item):
-            if not isinstance(item, dict):
-                return
-
-            # URLهای رایج metadata
-            add_url(item.get("display_url"))
-            add_url(item.get("thumbnail"))
-            add_url(item.get("thumbnail_url"))
-
-            # thumbnails
-            for thumb in item.get("thumbnails") or []:
-                if isinstance(thumb, dict):
-                    add_url(thumb.get("url"))
-
-            # برخی پاسخ‌های Instagram/yt-dlp
-            image_versions = item.get("image_versions2")
-            if isinstance(image_versions, dict):
-                for candidate in image_versions.get("candidates") or []:
-                    if isinstance(candidate, dict):
-                        add_url(candidate.get("url"))
-
-            # اگر metadata ساختار entries داشته باشد
-            for entry in item.get("entries") or []:
-                collect_image_urls(entry)
-
-        collect_image_urls(info)
-
-        # URLهای بزرگ‌تر را جلوتر امتحان می‌کنیم.
-        def image_score(u):
-            m = re.search(r'[_-](\d{3,5})x(\d{3,5})', u)
-            if m:
-                return int(m.group(1)) * int(m.group(2))
-            return 0
-
-        image_urls.sort(key=image_score, reverse=True)
-
-        logger.info(
-            "Instagram PHOTO metadata: %d image URL(s) found",
-            len(image_urls),
-        )
-
-        # اگر yt-dlp URL تصویر را نداد، fallback HTML را امتحان کن.
-        if not image_urls:
-            fallback_url = _extract_og_image(url)
-            if fallback_url:
-                image_urls.append(fallback_url)
-
-        if not image_urls:
-            raise RuntimeError(
-                "URL عکس Instagram از metadata پیدا نشد."
-            )
-
-        img_path = os.path.join(
-            DOWNLOAD_DIR,
-            f"{unique_prefix}_photo.jpg"
-        )
-
-        common_kwargs = dict(
-            headers={
-                "User-Agent": (
-                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                    "AppleWebKit/537.36 (KHTML, like Gecko) "
-                    "Chrome/131.0.0.0 Safari/537.36"
-                ),
-                "Accept": (
-                    "image/avif,image/webp,image/apng,image/svg+xml,"
-                    "image/*,*/*;q=0.8"
-                ),
-                "Accept-Language": "en-US,en;q=0.9",
-                "Referer": "https://www.instagram.com/",
-            },
-            cookies=_load_cookie_jar(),
-            timeout=(15, 30),
-            retries=3,
-        )
-
-        last_error = None
-
-        for image_url in image_urls:
-            try:
-                logger.info(
-                    "Instagram PHOTO: downloading image URL"
-                )
-
-                _download_binary(
-                    image_url,
-                    img_path,
-                    **common_kwargs
-                )
-
-                # جلوگیری از ذخیره HTML/error page به‌عنوان عکس
-                with open(img_path, "rb") as f:
-                    header = f.read(16)
-
-                valid_image = (
-                    header.startswith(b"\xff\xd8\xff") or
-                    header.startswith(b"\x89PNG\r\n\x1a\n") or
-                    (
-                        header.startswith(b"RIFF")
-                        and header[8:12] == b"WEBP"
-                    ) or
-                    header.startswith(b"GIF87a") or
-                    header.startswith(b"GIF89a")
-                )
-
-                if not valid_image:
-                    raise IOError(
-                        "فایل دریافت‌شده signature معتبر تصویر ندارد."
-                    )
-
-                if os.path.getsize(img_path) <= 0:
-                    raise IOError(
-                        "فایل تصویر خالی دریافت شد."
-                    )
-
-                logger.info(
-                    "Instagram PHOTO: download successful"
-                )
-
-                return [(img_path, "photo")]
-
-            except Exception as e:
-                last_error = e
-                logger.warning(
-                    "دانلود URL عکس شکست خورد: %s",
-                    e
-                )
-
-                if os.path.exists(img_path):
-                    try:
-                        os.remove(img_path)
-                    except OSError:
-                        pass
-
-        raise last_error or RuntimeError(
-            "هیچ‌کدام از URLهای عکس Instagram قابل دانلود نبودند."
-        )
-
-    except Exception as e:
-        logger.warning(
-            "Instagram PHOTO download failed: %s",
-            e
-        )
-        raise
-
 def _extract_og_image(url: str):
-    """Fallback نهایی برای استخراج URL عکس از HTML."""
+    """
+    Fallback نهایی برای استخراج URL عکس از HTML صفحه‌ی پست (بدون وابستگی به yt-dlp).
+    این تابع وقتی صدا زده می‌شه که yt-dlp نتونسته URL عکسی برگردونه یا اصلاً با خطا
+    متوقف شده باشه.
+    """
     try:
         resp = requests.get(
             url,
             headers={
-                "User-Agent": (
-                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                    "AppleWebKit/537.36 (KHTML, like Gecko) "
-                    "Chrome/131.0.0.0 Safari/537.36"
-                ),
+                "User-Agent": DEFAULT_UA,
                 "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
                 "Accept-Language": "en-US,en;q=0.9",
                 "Referer": "https://www.instagram.com/",
@@ -669,45 +561,188 @@ def _extract_og_image(url: str):
     return None
 
 
+def _collect_instagram_image_urls(info) -> list:
+    """از دیکشنری metadata که yt-dlp برمی‌گردونه، همه‌ی URLهای عکس ممکن رو جمع می‌کنه."""
+    image_urls = []
+
+    def add_url(value):
+        if isinstance(value, str):
+            value = value.strip()
+            if value.startswith(("http://", "https://")) and value not in image_urls:
+                image_urls.append(value)
+
+    def collect(item):
+        if not isinstance(item, dict):
+            return
+
+        # URLهای رایج metadata
+        add_url(item.get("display_url"))
+        add_url(item.get("thumbnail"))
+        add_url(item.get("thumbnail_url"))
+
+        for thumb in item.get("thumbnails") or []:
+            if isinstance(thumb, dict):
+                add_url(thumb.get("url"))
+
+        # برخی پاسخ‌های خام Instagram/yt-dlp
+        image_versions = item.get("image_versions2")
+        if isinstance(image_versions, dict):
+            for candidate in image_versions.get("candidates") or []:
+                if isinstance(candidate, dict):
+                    add_url(candidate.get("url"))
+
+        # پست‌های چندعکسی (carousel/sidecar)
+        sidecar = item.get("edge_sidecar_to_children")
+        if isinstance(sidecar, dict):
+            for edge in sidecar.get("edges") or []:
+                collect((edge or {}).get("node"))
+
+        # اگر metadata ساختار entries داشته باشد (پلی‌لیست/carousel)
+        for entry in item.get("entries") or []:
+            collect(entry)
+
+    collect(info if isinstance(info, dict) else {})
+
+    # URLهای بزرگ‌تر را جلوتر امتحان می‌کنیم (بر اساس ابعاد داخل خود URL، اگر موجود باشد)
+    def image_score(u):
+        m = re.search(r"[_-](\d{3,5})x(\d{3,5})", u)
+        if m:
+            return int(m.group(1)) * int(m.group(2))
+        return 0
+
+    image_urls.sort(key=image_score, reverse=True)
+
+    # حذف کراپِ احتمالی هر URL برای گرفتن نسخه‌ی کامل عکس
+    return [_strip_instagram_crop(u) for u in image_urls]
 
 
-COOKIE_SOURCE = "/etc/secrets/cookies.txt"
-COOKIE_FILE = os.path.join(DOWNLOAD_DIR, "cookies.txt")
-
-if os.path.exists(COOKIE_SOURCE):
-    shutil.copy2(COOKIE_SOURCE, COOKIE_FILE)
-
-
-def _load_cookie_jar():
+def _download_instagram_photo(url: str, unique_prefix: str):
     """
-    کوکی‌های اینستاگرام رو (همون فایلی که به yt-dlp هم داده میشه) برای
-    درخواست‌های مستقیم requests (گرفتن og:image و خودِ عکس) لود می‌کنه.
-    بدون این کوکی‌ها، اینستاگرام گاهی نسخه محدود/ناقصی از صفحه یا عکس رو برمی‌گردونه.
+    دانلود عکس اینستاگرام با چند لایه fallback:
+      1) استخراج metadata با yt-dlp (بدون دانلود واقعی: download=False)
+      2) اگر yt-dlp با خطا متوقف شد یا URL عکسی برنگردوند -> اسکرپ مستقیم HTML صفحه (og:image)
+      3) دانلود واقعی فایل با تایید signature عکس (jpg/png/webp/gif) تا هیچ‌وقت
+         صفحه‌ی خطا/HTML به‌جای عکس ذخیره نشه
+    این تابع طوری نوشته شده که هیچ‌وقت با خطای خام yt-dlp ("No video formats found" و
+    مشابه آن) کرش نکنه؛ همیشه اول fallback رو امتحان می‌کنه و در نهایت خطای واضح می‌ده.
     """
-    jar = http.cookiejar.MozillaCookieJar()
-    if os.path.exists(COOKIE_FILE):
+    ydl_opts = {
+        "outtmpl": os.path.join(DOWNLOAD_DIR, f"{unique_prefix}_%(id)s.%(ext)s"),
+        "noplaylist": False,
+        "quiet": True,
+        "no_warnings": True,
+        "socket_timeout": 30,
+        "retries": 2,
+        "fragment_retries": 2,
+        "nocheckcertificate": True,
+        "cookiefile": COOKIE_FILE,
+        # عمداً هیچ "format" ی نمی‌دیم و ignore_no_formats_error رو فعال می‌کنیم
+        # چون پست عکس خالص هیچ فرمت ویدیویی نداره و نباید همین جا کرش کنه.
+        "ignore_no_formats_error": True,
+    }
+
+    image_urls = []
+
+    try:
+        logger.info("Instagram PHOTO: در حال استخراج metadata (بدون دانلود): %s", url)
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=False)  # عمداً download=False
+        if info:
+            image_urls = _collect_instagram_image_urls(info)
+        logger.info("Instagram PHOTO: %d آدرس عکس از metadata پیدا شد", len(image_urls))
+    except Exception as e:
+        # نکته‌ی مهم: اینجا دیگه raise نمی‌کنیم! هر خطای yt-dlp (مثل خطای فرمت،
+        # rate-limit یا نیاز به لاگین) نباید کل عملیات رو متوقف کنه؛ به‌جاش
+        # می‌ریم سراغ fallback اسکرپ مستقیم HTML.
+        logger.warning("Instagram PHOTO: استخراج metadata با yt-dlp شکست خورد، رفتن سراغ fallback: %s", e)
+
+    # اگر yt-dlp چیزی نداد (چه به‌خاطر خطا، چه چون واقعاً URL عکسی برنگردوند)
+    if not image_urls:
+        fallback_url = _extract_og_image(url)
+        if fallback_url:
+            image_urls = [_strip_instagram_crop(fallback_url)]
+            logger.info("Instagram PHOTO: از fallback (og:image) یک آدرس عکس پیدا شد")
+
+    if not image_urls:
+        raise RuntimeError("نشد آدرس عکس این پست اینستاگرام رو پیدا کنم. لینک رو چک کن یا بعداً دوباره امتحان کن.")
+
+    img_path = os.path.join(DOWNLOAD_DIR, f"{unique_prefix}_photo.jpg")
+
+    common_kwargs = dict(
+        headers={
+            "User-Agent": DEFAULT_UA,
+            "Accept": "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.9",
+            "Referer": "https://www.instagram.com/",
+        },
+        cookies=_load_cookie_jar(),
+        timeout=(15, 30),
+        retries=3,
+    )
+
+    last_error = None
+
+    for image_url in image_urls:
         try:
-            jar.load(COOKIE_FILE, ignore_discard=True, ignore_expires=True)
+            logger.info("Instagram PHOTO: در حال دانلود یک آدرس عکس کاندید")
+            _download_binary(image_url, img_path, **common_kwargs)
+
+            # جلوگیری از ذخیره HTML/error page به‌عنوان عکس: چک کردن magic bytes
+            with open(img_path, "rb") as f:
+                header = f.read(16)
+
+            valid_image = (
+                header.startswith(b"\xff\xd8\xff")
+                or header.startswith(b"\x89PNG\r\n\x1a\n")
+                or (header.startswith(b"RIFF") and header[8:12] == b"WEBP")
+                or header.startswith(b"GIF87a")
+                or header.startswith(b"GIF89a")
+            )
+
+            if not valid_image:
+                raise IOError("فایل دریافت‌شده signature معتبر تصویر ندارد.")
+
+            if os.path.getsize(img_path) <= 0:
+                raise IOError("فایل تصویر خالی دریافت شد.")
+
+            logger.info("Instagram PHOTO: دانلود با موفقیت انجام شد")
+            return [(img_path, "photo")]
+
         except Exception as e:
-            logger.warning("لود کردن فایل کوکی شکست خورد: %s", e)
-    return jar
+            last_error = e
+            logger.warning("دانلود یک آدرس عکس شکست خورد، رفتن سراغ کاندید بعدی: %s", e)
+            if os.path.exists(img_path):
+                try:
+                    os.remove(img_path)
+                except OSError:
+                    pass
+
+    raise last_error or RuntimeError("هیچ‌کدام از آدرس‌های عکس این پست قابل دانلود نبودند.")
 
 
+def download_media(url: str, media_type: str = "video_audio"):
+    """
+    نقطه‌ی ورودی موتور دانلود.
+    media_type: 'photo' یا 'video_audio'
+    خروجی: لیستی از (مسیر فایل, result_kind)
+    """
+    unique_prefix = uuid.uuid4().hex[:8]
 
-print("=== COOKIE TEST ===", flush=True)
-print("SOURCE:", os.path.exists(COOKIE_SOURCE), flush=True)
-print("COPIED:", os.path.exists(COOKIE_FILE), flush=True)
+    if media_type == "video_audio":
+        return _download_video_with_audio(url, unique_prefix)
 
+    if media_type != "photo":
+        raise ValueError(f"media_type نامعتبر است: {media_type}")
+
+    return _download_instagram_photo(url, unique_prefix)
 
 
 # ---------------- دانلود ویدیو (با صدای سالم داخلش) + استخراج یه فایل صدای جداگانه ----------------
+# توجه: به درخواست کاربر، منطق این بخش دست‌نخورده باقی مونده و فقط کامنت‌گذاری/نظم بهتر شده.
 def _download_video_with_audio(url: str, unique_prefix: str):
     # فرمت رو طوری انتخاب می‌کنیم که بهترین ویدیو و بهترین صدا با هم merge بشن
     ydl_opts = {
-        "outtmpl": os.path.join(
-            DOWNLOAD_DIR,
-            f"{unique_prefix}_%(id)s.%(ext)s"
-        ),
+        "outtmpl": os.path.join(DOWNLOAD_DIR, f"{unique_prefix}_%(id)s.%(ext)s"),
         "format": "bestvideo*+bestaudio/best",
         "merge_output_format": "mp4",
         "noplaylist": True,
@@ -740,16 +775,12 @@ def _download_video_with_audio(url: str, unique_prefix: str):
         if os.path.exists(raw_path):
             video_path = raw_path
         else:
-            raise FileNotFoundError(
-                "فایل ویدیو بعد از دانلود پیدا نشد."
-            )
+            raise FileNotFoundError("فایل ویدیو بعد از دانلود پیدا نشد.")
 
     results = [(video_path, "video")]
 
     # استخراج فایل MP3 از روی همان ویدیوی دانلودشده
-    audio_path = (
-        os.path.splitext(video_path)[0] + "_audio.mp3"
-    )
+    audio_path = os.path.splitext(video_path)[0] + "_audio.mp3"
 
     extract_cmd = [
         "ffmpeg",
@@ -770,9 +801,7 @@ def _download_video_with_audio(url: str, unique_prefix: str):
             timeout=180,
         )
     except FileNotFoundError:
-        raise FileNotFoundError(
-            "ffmpeg روی سیستم پیدا نشد؛ مطمئن شو نصب و در PATH هست."
-        )
+        raise FileNotFoundError("ffmpeg روی سیستم پیدا نشد؛ مطمئن شو نصب و در PATH هست.")
 
     if (
         result.returncode == 0
@@ -780,20 +809,16 @@ def _download_video_with_audio(url: str, unique_prefix: str):
         and os.path.getsize(audio_path) > 0
     ):
         results.append((audio_path, "audio"))
-
     else:
-        stderr_text = result.stderr.decode(
-            "utf-8",
-            errors="ignore"
-        ).lower()
+        stderr_text = result.stderr.decode("utf-8", errors="ignore").lower()
 
         if (
             "does not contain any stream" not in stderr_text
             and "output file is empty" not in stderr_text
         ):
             logger.warning(
-                f"استخراج صدا ناموفق بود برای "
-                f"{video_path}: {stderr_text[-300:]}"
+                "استخراج صدا ناموفق بود برای %s: %s",
+                video_path, stderr_text[-300:]
             )
 
         if os.path.exists(audio_path):
@@ -802,7 +827,9 @@ def _download_video_with_audio(url: str, unique_prefix: str):
     return results
 
 
-# ---------------- ارسال فایل بر اساس نوعش ----------------
+# ============================================================
+# 6) ارسال فایل بر اساس نوعش
+# ============================================================
 async def send_file(update: Update, context: ContextTypes.DEFAULT_TYPE, file_path: str, result_kind: str = "video"):
     ext = file_path.split(".")[-1].lower()
     caption = f"🤖 @{context.bot.username}"
@@ -818,14 +845,14 @@ async def send_file(update: Update, context: ContextTypes.DEFAULT_TYPE, file_pat
             await update.message.reply_document(f, caption=caption)
 
 
-# ---------------- هندلر سراسری خطا ----------------
+# ============================================================
+# 7) هندلر خطای سراسری
+# ============================================================
 async def global_error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
     logger.error("خطای مدیریت‌نشده رخ داد", exc_info=context.error)
 
 
 # ---------------- تنظیم منوی دستورات (☰) کنار باکس تایپ ----------------
-# با این کار کاربر همیشه (بدون نیاز به پاک کردن چت) می‌تونه رو آیکون منو
-# بزنه و /start رو انتخاب کنه تا زبان/نوع دانلود رو دوباره تنظیم کنه.
 async def post_init(application):
     await application.bot.set_my_commands([
         BotCommand("start", "🔄 شروع دوباره / تنظیمات جدید | Restart / new settings"),
@@ -835,23 +862,31 @@ async def post_init(application):
     await application.bot.set_chat_menu_button(menu_button=MenuButtonCommands())
 
 
-
-# Render Keep Alive
+# ============================================================
+# 8) Keep-Alive (Flask) — برای Render (پلن رایگان) + UptimeRobot
+#    این بخش عیناً حفظ شده تا پینگ‌های UptimeRobot بدون مشکل ادامه پیدا کنن.
+# ============================================================
 keep_alive = Flask(__name__)
+
 
 @keep_alive.route("/")
 def home():
     return "Bot is alive!"
 
+
 def run_keep_alive():
     keep_alive.run(
-    host="0.0.0.0",
-    port=int(os.environ.get("PORT", 10000))
-)
+        host="0.0.0.0",
+        port=int(os.environ.get("PORT", 10000)),
+    )
+
 
 Thread(target=run_keep_alive, daemon=True).start()
 
-# ---------------- اجرای ربات ----------------
+
+# ============================================================
+# 9) اجرای ربات
+# ============================================================
 def main():
     persistence = PicklePersistence(filepath=PERSISTENCE_FILE)
 
