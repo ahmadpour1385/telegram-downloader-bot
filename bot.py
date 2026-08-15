@@ -1,5 +1,6 @@
 from flask import Flask
 from threading import Thread
+from threading import Thread
 import os
 import re
 import json
@@ -9,7 +10,6 @@ import logging
 import subprocess
 import shutil
 import http.cookiejar
-from urllib.parse import urlparse
 from concurrent.futures import ThreadPoolExecutor
 import requests
 import yt_dlp
@@ -39,7 +39,7 @@ DOWNLOAD_DIR = "downloads"
 PERSISTENCE_FILE = "bot_data.pkl"
 
 # ترد پول اختصاصی برای دانلود، مستقل از تعداد هسته‌ی CPU سرور
-DOWNLOAD_EXECUTOR = ThreadPoolExecutor(max_workers=3)
+DOWNLOAD_EXECUTOR = ThreadPoolExecutor(max_workers=20)
 
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
@@ -72,11 +72,6 @@ TEXTS = {
         "downloading_video_audio": "⏳🎧 در حال دانلود ویدیو و آماده‌سازی فایل صدا... چند لحظه صبر کن",
         "done": "✅ دانلود انجام شد!",
         "failed": "❌ نشد دانلودش کنم.\nخطا: {err}",
-        "unsupported_platform": (
-            "🚧 این پلتفرم فعلاً پشتیبانی نمی‌شود.\n\n"
-            "در حال حاضر فقط لینک‌های Instagram قابل دانلود هستند.\n"
-            "قابلیت دانلود از سایر پلتفرم‌ها به‌زودی اضافه می‌شود. ⏳"
-        ),
     },
     "en": {
         "choose_lang": "Please choose your language 🌐",
@@ -99,11 +94,6 @@ TEXTS = {
         "downloading_video_audio": "⏳🎧 Downloading the video and preparing the audio file... please wait",
         "done": "✅ Download complete!",
         "failed": "❌ Couldn't download it.\nError: {err}",
-        "unsupported_platform": (
-            "🚧 This platform is not supported yet.\n\n"
-            "Currently, only Instagram links can be downloaded.\n"
-            "Support for other platforms will be added soon. ⏳"
-        ),
     },
 }
 
@@ -111,20 +101,6 @@ TEXTS = {
 def t(context: ContextTypes.DEFAULT_TYPE, key: str) -> str:
     lang = context.user_data.get("lang", "fa")
     return TEXTS[lang][key]
-
-
-# ------------------------------------------------------------------
-# فقط Instagram فعال است. تمام لینک‌های سایر پلتفرم‌ها قبل از رسیدن
-# به yt-dlp متوقف می‌شوند تا هیچ درخواست غیرضروری به سرویس‌های دیگر
-# ارسال نشود.
-# ------------------------------------------------------------------
-def is_instagram_url(url: str) -> bool:
-    try:
-        parsed = urlparse(url.strip())
-        host = (parsed.hostname or "").lower().rstrip(".")
-        return host == "instagram.com" or host.endswith(".instagram.com")
-    except Exception:
-        return False
 
 
 # متن دکمه‌های زبان -> کد زبان
@@ -240,10 +216,6 @@ async def type_chosen(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["download_type"] = media_type
 
     last_url = context.user_data.get("last_url")
-    if last_url and not is_instagram_url(last_url):
-        context.user_data.pop("last_url", None)
-        last_url = None
-
     if last_url:
         # نوع دانلود عوض شد؛ حالا می‌پرسیم همون لینک قبلی رو با فرمت جدید بگیره یا کاربر لینک تازه‌ای می‌خواد
         keyboard = ReplyKeyboardMarkup(
@@ -289,18 +261,12 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     url = update.message.text.strip()
 
-    if not url.startswith(("http://", "https://")):
+    if not url.startswith("http"):
         msg = await update.message.reply_text(t(context, "invalid_link"))
         await track_msg(context, msg)
         return
 
-    if not is_instagram_url(url):
-        msg = await update.message.reply_text(t(context, "unsupported_platform"))
-        await track_msg(context, msg)
-        return
-
-    # فقط لینک‌های Instagram ذخیره می‌شوند تا لینک پلتفرم دیگری
-    # در دانلود مجدد یا تغییر نوع دانلود وارد مسیر yt-dlp نشود.
+    # لینک رو ذخیره می‌کنیم تا اگه بعداً کاربر فقط نوع دانلود رو عوض کرد
     # (مثلاً اول صدا خواست، بعد ویدیو)، لازم نباشه لینک رو دوباره بفرسته
     context.user_data["last_url"] = url
 
@@ -311,12 +277,6 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def process_download(update: Update, context: ContextTypes.DEFAULT_TYPE, url: str):
     file_paths = []
     status_msg = None
-
-    if not is_instagram_url(url):
-        msg = await update.message.reply_text(t(context, "unsupported_platform"))
-        await track_msg(context, msg)
-        return
-
     try:
         media_type = context.user_data.get("download_type", "video_audio")
         status_key = "downloading_video_audio" if media_type == "video_audio" else "downloading"
@@ -335,15 +295,7 @@ async def process_download(update: Update, context: ContextTypes.DEFAULT_TYPE, u
         await status_msg.edit_text(t(context, "done"))
     except Exception as e:
         logger.error(f"خطا در دانلود لینک {url}: {e}", exc_info=True)
-        raw_error = str(e)
-        if "429" in raw_error or "Too Many Requests" in raw_error:
-            err_text = (
-                "⚠️ اینستاگرام موقتاً تعداد درخواست‌های این ربات را محدود کرده است.\n"
-                "چند دقیقه بعد دوباره امتحان کن.\n\n"
-                "ربات برای جلوگیری از تکرار محدودیت، تعداد دانلودهای همزمان را کاهش داده است."
-            )
-        else:
-            err_text = t(context, "failed").format(err=raw_error[:300])
+        err_text = t(context, "failed").format(err=str(e)[:300])
         try:
             if status_msg:
                 await status_msg.edit_text(err_text)
@@ -456,115 +408,118 @@ def download_media(url: str, media_type: str = "video_audio"):
     media_type: 'photo' یا 'video_audio'
     خروجی: لیستی از (مسیر فایل, result_kind)
 
-    این تابع عمداً فقط Instagram را می‌پذیرد؛ این لایه‌ی دفاعی باعث
-    می‌شود حتی اگر یک مسیر داخلی اشتباهی فراخوانی شد، لینک پلتفرم دیگر
-    هرگز به yt-dlp ارسال نشود.
+    نکته مهم:
+    برای عکس Instagram هیچ دانلودی توسط yt-dlp انجام نمی‌دهیم.
+    yt-dlp فقط metadata را استخراج می‌کند و فایل تصویر مستقیماً
+    از URL تصویر دریافت می‌شود. این کار جلوی خطای
+    "No video formats found!" برای پست‌های عکس خالص را می‌گیرد.
     """
-    if not is_instagram_url(url):
-        raise ValueError("این پلتفرم فعلاً پشتیبانی نمی‌شود.")
-
     unique_prefix = uuid.uuid4().hex[:8]
 
     if media_type == "video_audio":
         return _download_video_with_audio(url, unique_prefix)
 
-    # ---- حالت عکس ----
+    if media_type != "photo":
+        raise ValueError(f"media_type نامعتبر است: {media_type}")
+
+    # ---------------------------------------------------------
+    # Instagram PHOTO
+    # ---------------------------------------------------------
+    # download=False بسیار مهم است؛ برای پست عکس خالص نباید yt-dlp
+    # وارد مرحله دانلود/جستجوی video formats شود.
     ydl_opts = {
-        "outtmpl": os.path.join(DOWNLOAD_DIR, f"{unique_prefix}_%(id)s.%(ext)s"),
-        "format": "best[filesize<50M]/best",
-        # مهم: برای پست‌های عکس خالص، yt-dlp در حالت عادی
-        # با "There is no video in this post" متوقف می‌شود.
-        # با این گزینه metadata برمی‌گردد و ما thumbnail/image URL را از
-        # همان metadata می‌گیریم.
-        "ignore_no_formats_error": True,
-        "noplaylist": True,
+        "outtmpl": os.path.join(
+            DOWNLOAD_DIR,
+            f"{unique_prefix}_%(id)s.%(ext)s"
+        ),
+        "noplaylist": False,
         "quiet": False,
         "no_warnings": False,
-        "overwrites": True,
-        "concurrent_fragment_downloads": 1,
         "socket_timeout": 30,
         "retries": 2,
         "fragment_retries": 2,
-        "sleep_interval_requests": 1,
-        "max_sleep_interval_requests": 3,
         "nocheckcertificate": True,
-        "http_headers": {
-            "User-Agent": (
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/131.0.0.0 Safari/537.36"
-            ),
-            "Referer": "https://www.instagram.com/",
-            "Accept-Language": "en-US,en;q=0.9",
-        },
         "cookiefile": COOKIE_FILE,
+        "ignore_no_formats_error": True,
     }
 
     try:
+        logger.info("Instagram PHOTO: extracting metadata only: %s", url)
+
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=True)
+            # عمداً download=False
+            info = ydl.extract_info(url, download=False)
 
-            # اگر واقعاً فایل ویدیویی/تصویری توسط yt-dlp ساخته شده باشد
-            file_path = ydl.prepare_filename(info)
+        if not info:
+            raise RuntimeError(
+                "Instagram اطلاعات پست را برنگرداند."
+            )
 
-        if os.path.exists(file_path) and os.path.getsize(file_path) > 0:
-            ext = file_path.rsplit(".", 1)[-1].lower()
-            if ext in ["mp4", "mkv", "webm", "mov"]:
-                # عکس خواسته شده؛ از thumbnail استفاده می‌کنیم.
-                pass
-            else:
-                return [(file_path, "photo")]
-
-        # برای Instagram photo post، اطلاعات تصویر داخل metadata می‌آید.
         image_urls = []
 
         def add_url(value):
-            if isinstance(value, str) and value.startswith(("http://", "https://")):
-                if value not in image_urls:
-                    image_urls.append(value)
+            if isinstance(value, str):
+                value = value.strip()
+                if value.startswith(("http://", "https://")):
+                    if value not in image_urls:
+                        image_urls.append(value)
 
-        add_url(info.get("thumbnail"))
-        add_url(info.get("display_url"))
+        def collect_image_urls(item):
+            if not isinstance(item, dict):
+                return
 
-        # yt-dlp برای Instagram image_versions2 را معمولاً در thumbnails می‌دهد.
-        for thumb in info.get("thumbnails") or []:
-            if isinstance(thumb, dict):
-                add_url(thumb.get("url"))
+            # URLهای رایج metadata
+            add_url(item.get("display_url"))
+            add_url(item.get("thumbnail"))
+            add_url(item.get("thumbnail_url"))
 
-        # اگر metadata به شکل playlist برگشته باشد (carousel)
-        for entry in info.get("entries") or []:
-            if not entry:
-                continue
-            add_url(entry.get("thumbnail"))
-            add_url(entry.get("display_url"))
-            for thumb in entry.get("thumbnails") or []:
+            # thumbnails
+            for thumb in item.get("thumbnails") or []:
                 if isinstance(thumb, dict):
                     add_url(thumb.get("url"))
 
-        # از آخرین/بالاترین کیفیت‌ها شروع نکنیم؛ URLهای تکراری را حذف کرده‌ایم.
-        # اول URLهایی که رزولوشن بالاتری دارند را امتحان می‌کنیم.
-        def thumb_score(u):
+            # برخی پاسخ‌های Instagram/yt-dlp
+            image_versions = item.get("image_versions2")
+            if isinstance(image_versions, dict):
+                for candidate in image_versions.get("candidates") or []:
+                    if isinstance(candidate, dict):
+                        add_url(candidate.get("url"))
+
+            # اگر metadata ساختار entries داشته باشد
+            for entry in item.get("entries") or []:
+                collect_image_urls(entry)
+
+        collect_image_urls(info)
+
+        # URLهای بزرگ‌تر را جلوتر امتحان می‌کنیم.
+        def image_score(u):
             m = re.search(r'[_-](\d{3,5})x(\d{3,5})', u)
             if m:
                 return int(m.group(1)) * int(m.group(2))
             return 0
 
-        image_urls.sort(key=thumb_score, reverse=True)
+        image_urls.sort(key=image_score, reverse=True)
 
-        logger.info("Instagram metadata: %d image URL found", len(image_urls))
+        logger.info(
+            "Instagram PHOTO metadata: %d image URL(s) found",
+            len(image_urls),
+        )
 
+        # اگر yt-dlp URL تصویر را نداد، fallback HTML را امتحان کن.
         if not image_urls:
-            # فقط در این حالت سراغ fallback قدیمی می‌رویم.
-            image_url = _extract_og_image(url)
-            if image_url:
-                image_urls.append(image_url)
+            fallback_url = _extract_og_image(url)
+            if fallback_url:
+                image_urls.append(fallback_url)
 
         if not image_urls:
             raise RuntimeError(
-                "yt-dlp اطلاعات پست را گرفت، اما URL عکس داخل metadata پیدا نشد."
+                "URL عکس Instagram از metadata پیدا نشد."
             )
 
-        img_path = os.path.join(DOWNLOAD_DIR, f"{unique_prefix}_photo.jpg")
+        img_path = os.path.join(
+            DOWNLOAD_DIR,
+            f"{unique_prefix}_photo.jpg"
+        )
 
         common_kwargs = dict(
             headers={
@@ -573,43 +528,69 @@ def download_media(url: str, media_type: str = "video_audio"):
                     "AppleWebKit/537.36 (KHTML, like Gecko) "
                     "Chrome/131.0.0.0 Safari/537.36"
                 ),
-                "Accept": "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
+                "Accept": (
+                    "image/avif,image/webp,image/apng,image/svg+xml,"
+                    "image/*,*/*;q=0.8"
+                ),
+                "Accept-Language": "en-US,en;q=0.9",
                 "Referer": "https://www.instagram.com/",
             },
             cookies=_load_cookie_jar(),
-            timeout=30,
-            retries=4,
+            timeout=(15, 30),
+            retries=3,
         )
 
         last_error = None
 
         for image_url in image_urls:
             try:
-                logger.info("تلاش برای دانلود عکس از metadata: %s", image_url)
+                logger.info(
+                    "Instagram PHOTO: downloading image URL"
+                )
 
-                _download_binary(image_url, img_path, **common_kwargs)
+                _download_binary(
+                    image_url,
+                    img_path,
+                    **common_kwargs
+                )
 
-                # بررسی ساده‌ی فایل تصویر با signature تا HTML/error page
-                # به‌عنوان عکس ذخیره نشود.
+                # جلوگیری از ذخیره HTML/error page به‌عنوان عکس
                 with open(img_path, "rb") as f:
                     header = f.read(16)
 
                 valid_image = (
-                    header.startswith(b"\xff\xd8\xff")      # JPEG
-                    or header.startswith(b"\x89PNG\r\n\x1a\n")  # PNG
-                    or header.startswith(b"RIFF") and header[8:12] == b"WEBP"
-                    or header.startswith(b"GIF87a")
-                    or header.startswith(b"GIF89a")
+                    header.startswith(b"\xff\xd8\xff") or
+                    header.startswith(b"\x89PNG\r\n\x1a\n") or
+                    (
+                        header.startswith(b"RIFF")
+                        and header[8:12] == b"WEBP"
+                    ) or
+                    header.startswith(b"GIF87a") or
+                    header.startswith(b"GIF89a")
                 )
 
                 if not valid_image:
-                    raise IOError("فایل دریافت‌شده signature معتبر تصویر ندارد.")
+                    raise IOError(
+                        "فایل دریافت‌شده signature معتبر تصویر ندارد."
+                    )
+
+                if os.path.getsize(img_path) <= 0:
+                    raise IOError(
+                        "فایل تصویر خالی دریافت شد."
+                    )
+
+                logger.info(
+                    "Instagram PHOTO: download successful"
+                )
 
                 return [(img_path, "photo")]
 
             except Exception as e:
                 last_error = e
-                logger.warning("دانلود این URL عکس شکست خورد: %s", e)
+                logger.warning(
+                    "دانلود URL عکس شکست خورد: %s",
+                    e
+                )
 
                 if os.path.exists(img_path):
                     try:
@@ -617,13 +598,16 @@ def download_media(url: str, media_type: str = "video_audio"):
                     except OSError:
                         pass
 
-        raise last_error or RuntimeError("هیچ‌کدام از URLهای عکس قابل دانلود نبودند.")
+        raise last_error or RuntimeError(
+            "هیچ‌کدام از URLهای عکس Instagram قابل دانلود نبودند."
+        )
 
     except Exception as e:
-        logger.warning("دانلود عکس با yt-dlp/metadata شکست خورد: %s", e)
+        logger.warning(
+            "Instagram PHOTO download failed: %s",
+            e
+        )
         raise
-
-
 
 def _extract_og_image(url: str):
     """Fallback نهایی برای استخراج URL عکس از HTML."""
@@ -730,22 +714,11 @@ def _download_video_with_audio(url: str, unique_prefix: str):
         "quiet": True,
         "no_warnings": True,
         "overwrites": True,
-        "concurrent_fragment_downloads": 1,
+        "concurrent_fragment_downloads": 8,
         "socket_timeout": 30,
-        "retries": 2,
-        "fragment_retries": 2,
-        "sleep_interval_requests": 1,
-        "max_sleep_interval_requests": 3,
+        "retries": 5,
+        "fragment_retries": 5,
         "nocheckcertificate": True,
-        "http_headers": {
-            "User-Agent": (
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/131.0.0.0 Safari/537.36"
-            ),
-            "Referer": "https://www.instagram.com/",
-            "Accept-Language": "en-US,en;q=0.9",
-        },
         "cookiefile": COOKIE_FILE,
     }
 
