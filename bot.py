@@ -676,7 +676,10 @@ def _download_instagram_photo(url: str, unique_prefix: str):
             "Referer": "https://www.instagram.com/",
         },
         cookies=_load_cookie_jar(),
-        timeout=(15, 30),
+        # نکته: _download_binary خودش تاپل (connect, read) رو از روی همین مقدار می‌سازه
+        # (داخلش timeout=(15, timeout))، پس اینجا فقط باید یک عدد (read-timeout) بدیم؛
+        # قبلاً اشتباهاً (15, 30) پاس داده می‌شد و تاپل تودرتو باعث خطای requests می‌شد.
+        timeout=30,
         retries=3,
     )
 
